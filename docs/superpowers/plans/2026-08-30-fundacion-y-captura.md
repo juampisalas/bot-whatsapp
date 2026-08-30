@@ -21,6 +21,7 @@
 - Todos los secretos por variables de entorno. Nunca hardcodeados.
 - Tests antes de la implementación, en todas las tareas.
 - Un commit por tarea como mínimo.
+- El esquema y las consultas siguen la skill de Drizzle del proyecto, en `.agents/skills/drizzle`. En particular: nada de `pgEnum`, se usa `text().$type<Union>()`; siempre `db.select()` y nunca la API relacional `db.query.*`; clave primaria de una sola columna, con la unicidad de negocio en un `uniqueIndex`; `COALESCE` solo cuando el manejo de nulos es semántica requerida de la base, no como relleno de upserts; y JSDoc en las columnas cuyo significado no se deduce del nombre.
 
 ## Mapa de archivos
 
@@ -51,6 +52,7 @@
 | `src/capture/buffer.ts` | Buffer acotado ante caída de la base |
 | `src/capture/ingest.ts` | Pipeline de ingesta |
 | `src/index.ts` | Punto de entrada y comando de listado |
+| `tests/helpers/fixtures.ts` | Constructor del mensaje de prueba, compartido por todos los tests |
 
 ---
 
@@ -396,7 +398,9 @@ git commit -m "feat: Postgres con pgvector y cliente de base"
 
 **Interfaces:**
 - Consumes: `createDb` de Task 2
-- Produces: las tablas `conversations`, `participants`, `messages`, `attachments`, `capturePolicy`, `captureRules`, y los enums `providerEnum`, `conversationKindEnum`, `attachmentKindEnum`, `downloadStatusEnum`, `captureModeEnum`. Produce además `runMigrations(connectionString: string): Promise<void>`.
+- Produces: las tablas `conversations`, `participants`, `messages`, `attachments`, `capturePolicy`, `captureRules`, y la función `runMigrations(connectionString: string): Promise<void>`.
+
+Las columnas de valores acotados usan `text().$type<Union>()` con los tipos de unión de `src/domain/types.ts`, no `pgEnum`. Es lo que manda la skill de Drizzle del proyecto: un enum de Postgres necesita una migración para agregar un valor y es incómodo de renombrar o quitar, mientras un `text` tipado da la misma seguridad en TypeScript sin costo de migración. Además evita duplicar los valores entre el dominio y el esquema.
 
 Solo se crean las tablas que este plan necesita. Las de resúmenes, preferencias, cola de salida, derivaciones de adjuntos, aclaraciones pendientes y estado de sincronización las agregan los planes siguientes con sus propias migraciones. La columna `embedding` sí se incluye ahora, porque fija la dimensión y valida que la extensión funcione, pero su índice HNSW lo crea el plan de búsqueda semántica cuando haga falta.
 
@@ -467,7 +471,6 @@ import {
   index,
   integer,
   jsonb,
-  pgEnum,
   pgTable,
   text,
   timestamp,
@@ -475,62 +478,86 @@ import {
   uuid,
   vector,
 } from 'drizzle-orm/pg-core'
+import type {
+  AttachmentKind,
+  CaptureMode,
+  ConversationKind,
+  DownloadStatus,
+  ProviderId,
+} from '../domain/types.ts'
 
-export const providerEnum = pgEnum('provider', ['whatsapp', 'telegram', 'slack', 'gmail', 'fake'])
-export const conversationKindEnum = pgEnum('conversation_kind', ['dm', 'group', 'channel', 'thread'])
-export const attachmentKindEnum = pgEnum('attachment_kind', [
-  'image',
-  'audio',
-  'video',
-  'document',
-  'sticker',
-])
-export const downloadStatusEnum = pgEnum('download_status', ['pending', 'ok', 'failed'])
-export const captureModeEnum = pgEnum('capture_mode', ['all', 'whitelist', 'blacklist'])
-
+/**
+ * Conversaciones de cualquier canal: chats uno a uno, grupos e hilos.
+ * La identidad es el par proveedor e identificador externo, así que
+ * sumar un canal nuevo no colisiona con los existentes.
+ */
 export const conversations = pgTable(
   'conversations',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    provider: providerEnum('provider').notNull(),
+    provider: text('provider').$type<ProviderId>().notNull(),
+    /** Identificador nativo del canal. En WhatsApp es el JID, por ejemplo `1203...@g.us`. */
     externalId: text('external_id').notNull(),
-    kind: conversationKindEnum('kind').notNull(),
+    kind: text('kind').$type<ConversationKind>().notNull(),
     name: text('name'),
+    /** Momento del último mensaje capturado, para ordenar por actividad reciente. */
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('conversations_provider_external_id_idx').on(t.provider, t.externalId)],
 )
 
+/** Remitentes observados en cualquier canal. */
 export const participants = pgTable(
   'participants',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    provider: providerEnum('provider').notNull(),
+    provider: text('provider').$type<ProviderId>().notNull(),
+    /** Identificador nativo del remitente. En WhatsApp es su JID. */
     externalId: text('external_id').notNull(),
+    /** Nombre que el canal reporta. Puede faltar y puede cambiar con el tiempo. */
     displayName: text('display_name'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('participants_provider_external_id_idx').on(t.provider, t.externalId)],
 )
 
+/**
+ * Mensajes capturados. La unicidad por proveedor e identificador externo es
+ * la que vuelve idempotente la ingesta, necesaria porque el history sync de
+ * WhatsApp reentrega mensajes que ya llegaron en vivo.
+ */
 export const messages = pgTable(
   'messages',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    provider: providerEnum('provider').notNull(),
+    provider: text('provider').$type<ProviderId>().notNull(),
     externalId: text('external_id').notNull(),
     conversationId: uuid('conversation_id')
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
+    /** Null cuando el canal no identifica remitente, como en mensajes de sistema. */
     participantId: uuid('participant_id').references(() => participants.id),
     sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),
+    /** Verdadero si lo envió la cuenta vinculada. En WhatsApp incluye lo que manda el bot. */
     fromSelf: boolean('from_self').notNull(),
+    /** Texto del mensaje, o el epígrafe si el mensaje es un adjunto con texto. */
     text: text('text'),
+    /** Solo para canales de correo. Null en mensajería instantánea. */
     subject: text('subject'),
+    /** Solo para canales de correo. Null en mensajería instantánea. */
     threadExternalId: text('thread_external_id'),
     replyToExternalId: text('reply_to_external_id'),
+    /**
+     * Carga original del proveedor, sin tipar a propósito. Solo el adaptador
+     * que la escribió sabe interpretarla, y se guarda porque volver a
+     * descargar un adjunto que falló la necesita. No es una columna de
+     * extensión especulativa: tiene ese consumidor concreto.
+     */
     raw: jsonb('raw'),
+    /** Null hasta que una búsqueda por tema fuerza a embeddear este mensaje. */
     embedding: vector('embedding', { dimensions: 768 }),
     embeddedAt: timestamp('embedded_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -541,6 +568,7 @@ export const messages = pgTable(
   ],
 )
 
+/** Adjuntos de un mensaje, con el estado de la descarga de sus bytes. */
 export const attachments = pgTable(
   'attachments',
   {
@@ -548,30 +576,47 @@ export const attachments = pgTable(
     messageId: uuid('message_id')
       .notNull()
       .references(() => messages.id, { onDelete: 'cascade' }),
+    /** Identificador estable dentro del mensaje, por ejemplo `ABC123:0`. */
     externalId: text('external_id').notNull(),
-    kind: attachmentKindEnum('kind').notNull(),
+    kind: text('kind').$type<AttachmentKind>().notNull(),
     mimeType: text('mime_type'),
     sizeBytes: integer('size_bytes'),
+    /** Duración en milisegundos para audio y video. Null en el resto. */
     durationMs: integer('duration_ms'),
+    /** Ruta en disco una vez descargado. Null mientras esté pendiente o fallido. */
     localPath: text('local_path'),
-    downloadStatus: downloadStatusEnum('download_status').notNull().default('pending'),
+    downloadStatus: text('download_status')
+      .$type<DownloadStatus>()
+      .notNull()
+      .default('pending'),
     downloadAttempts: integer('download_attempts').notNull().default(0),
     downloadError: text('download_error'),
   },
   (t) => [uniqueIndex('attachments_message_external_id_idx').on(t.messageId, t.externalId)],
 )
 
+/**
+ * Política de captura activa. Es una tabla de una sola fila: la clave
+ * primaria fija en 1 es lo que impide que existan dos políticas en
+ * conflicto. Es una excepción deliberada a la preferencia por claves
+ * uuid, porque acá el objetivo es justamente que la fila sea única.
+ */
 export const capturePolicy = pgTable('capture_policy', {
   id: integer('id').primaryKey().default(1),
-  mode: captureModeEnum('mode').notNull().default('all'),
+  mode: text('mode').$type<CaptureMode>().notNull().default('all'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
+/**
+ * Excepciones a la política activa. En modo whitelist son las únicas
+ * conversaciones que se capturan; en modo blacklist, las únicas que no.
+ * En modo all se ignoran.
+ */
 export const captureRules = pgTable(
   'capture_rules',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    provider: providerEnum('provider').notNull(),
+    provider: text('provider').$type<ProviderId>().notNull(),
     conversationExternalId: text('conversation_external_id').notNull(),
   },
   (t) => [uniqueIndex('capture_rules_provider_conversation_idx').on(t.provider, t.conversationExternalId)],
@@ -661,6 +706,12 @@ export type ProviderId = 'whatsapp' | 'telegram' | 'slack' | 'gmail' | 'fake'
 export type ConversationKind = 'dm' | 'group' | 'channel' | 'thread'
 
 export type AttachmentKind = 'image' | 'audio' | 'video' | 'document' | 'sticker'
+
+/** Modo de la política de captura. */
+export type CaptureMode = 'all' | 'whitelist' | 'blacklist'
+
+/** Estado de la descarga de los bytes de un adjunto. */
+export type DownloadStatus = 'pending' | 'ok' | 'failed'
 
 export interface ConversationRef {
   provider: ProviderId
@@ -793,15 +844,19 @@ export interface Logger {
 export const silentLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 ```
 
-- [ ] **Step 4: Escribir el test que falla**
+- [ ] **Step 4: Escribir el constructor de mensajes de prueba**
+
+Este helper lo comparten todos los archivos de test del plan, para que el mensaje de referencia esté definido en un solo lugar.
 
 ```ts
-// tests/providers/fake.test.ts
-import { test, expect } from 'bun:test'
-import { FakeProvider } from '../../src/providers/fake/index.ts'
+// tests/helpers/fixtures.ts
 import type { InboundMessage } from '../../src/domain/types.ts'
 
-function mensaje(overrides: Partial<InboundMessage> = {}): InboundMessage {
+/**
+ * Mensaje de referencia para los tests. Los campos que importan en cada
+ * caso se pasan por `overrides`; el resto queda en valores válidos.
+ */
+export function mensaje(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
     provider: 'fake',
     externalId: 'm1',
@@ -818,6 +873,16 @@ function mensaje(overrides: Partial<InboundMessage> = {}): InboundMessage {
     ...overrides,
   }
 }
+```
+
+- [ ] **Step 5: Escribir el test que falla**
+
+```ts
+// tests/providers/fake.test.ts
+import { test, expect } from 'bun:test'
+import { FakeProvider } from '../../src/providers/fake/index.ts'
+import type { InboundMessage } from '../../src/domain/types.ts'
+import { mensaje } from '../helpers/fixtures.ts'
 
 test('entrega los mensajes inyectados al manejador', async () => {
   const provider = new FakeProvider()
@@ -872,12 +937,12 @@ test('waitUntilReady resuelve una vez conectado y falla si no', async () => {
 })
 ```
 
-- [ ] **Step 5: Correr el test y verificar que falla**
+- [ ] **Step 6: Correr el test y verificar que falla**
 
 Run: `bun test tests/providers/fake.test.ts`
 Expected: FAIL, no resuelve `../../src/providers/fake/index.ts`.
 
-- [ ] **Step 6: Implementar el adaptador falso**
+- [ ] **Step 7: Implementar el adaptador falso**
 
 ```ts
 // src/providers/fake/index.ts
@@ -971,16 +1036,16 @@ export class FakeProvider implements MessagingProvider {
 }
 ```
 
-- [ ] **Step 7: Correr el test y verificar que pasa**
+- [ ] **Step 8: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers/fake.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 8: Verificar tipos y commitear**
+- [ ] **Step 9: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
-git add src/domain src/providers/fake tests/providers
+git add src/domain src/providers/fake tests/helpers tests/providers
 git commit -m "feat: tipos de dominio, puerto de mensajería y adaptador falso"
 ```
 
@@ -1124,11 +1189,16 @@ Expected: FAIL, no resuelve los módulos de repositorios.
 
 ```ts
 // src/store/repositories/conversations.ts
-import { sql } from 'drizzle-orm'
 import type { Db } from '../client.ts'
 import { conversations, participants } from '../schema.ts'
 import type { ConversationKind, ProviderId } from '../../domain/types.ts'
 
+/**
+ * El `set` del upsert se arma solo con los valores presentes, en lugar de
+ * resolver la ausencia con `COALESCE` en SQL. Un nombre nulo significa "el
+ * canal no lo informó esta vez", y en ese caso no se toca el que ya
+ * teníamos. `updatedAt` garantiza que el `set` nunca quede vacío.
+ */
 export async function upsertConversation(
   db: Db,
   input: { provider: ProviderId; externalId: string; kind: ConversationKind; name: string | null },
@@ -1143,7 +1213,11 @@ export async function upsertConversation(
     })
     .onConflictDoUpdate({
       target: [conversations.provider, conversations.externalId],
-      set: { name: sql`COALESCE(EXCLUDED.name, ${conversations.name})` },
+      set: {
+        kind: input.kind,
+        ...(input.name === null ? {} : { name: input.name }),
+        updatedAt: new Date(),
+      },
     })
     .returning({ id: conversations.id })
 
@@ -1165,7 +1239,10 @@ export async function upsertParticipant(
     })
     .onConflictDoUpdate({
       target: [participants.provider, participants.externalId],
-      set: { displayName: sql`COALESCE(EXCLUDED.display_name, ${participants.displayName})` },
+      set: {
+        ...(input.displayName === null ? {} : { displayName: input.displayName }),
+        updatedAt: new Date(),
+      },
     })
     .returning({ id: participants.id })
 
@@ -1275,7 +1352,7 @@ git commit -m "feat: repositorios idempotentes de conversaciones y mensajes"
 - Consumes: `Db` de Task 2, tablas de Task 3
 - Produces:
   - `shouldCapture(policy: CapturePolicy, conversationExternalId: string): boolean`
-  - el tipo `CapturePolicy = { mode: CaptureMode; rules: ReadonlySet<string> }`
+  - el tipo `CapturePolicy = { mode: CaptureMode; rules: ReadonlySet<string> }`, donde `CaptureMode` viene de `src/domain/types.ts`
   - `loadCapturePolicy(db: Db, provider: ProviderId): Promise<CapturePolicy>`
 
 La decisión es una función pura sin base de datos, para poder testear los tres modos sin infraestructura. La carga desde la base es una función aparte.
@@ -1318,7 +1395,7 @@ Expected: FAIL, no resuelve `../../src/capture/policy.ts`.
 
 ```ts
 // src/capture/policy.ts
-export type CaptureMode = 'all' | 'whitelist' | 'blacklist'
+import type { CaptureMode } from '../domain/types.ts'
 
 export interface CapturePolicy {
   mode: CaptureMode
@@ -1494,28 +1571,10 @@ import { createDb } from '../../src/store/client.ts'
 import { runMigrations } from '../../src/store/migrate.ts'
 import { createIngestPipeline } from '../../src/capture/ingest.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
-import type { InboundMessage } from '../../src/domain/types.ts'
+import { mensaje } from '../helpers/fixtures.ts'
 
 const url = process.env.DATABASE_URL_TEST ?? 'postgres://bot:bot@localhost:5433/botwhatsapp_test'
 const handle = createDb(url)
-
-function mensaje(overrides: Partial<InboundMessage> = {}): InboundMessage {
-  return {
-    provider: 'fake',
-    externalId: 'm1',
-    conversation: { externalId: 'c1', kind: 'group', name: 'Grupo Facu' },
-    sender: { externalId: 'p1', displayName: 'Ana' },
-    sentAt: new Date('2026-08-30T12:00:00Z'),
-    fromSelf: false,
-    text: 'hola gente',
-    subject: null,
-    threadExternalId: null,
-    replyToExternalId: null,
-    attachments: [],
-    raw: { fake: true },
-    ...overrides,
-  }
-}
 
 beforeAll(async () => {
   await runMigrations(url)
@@ -1540,7 +1599,7 @@ test('persiste un mensaje entrante de punta a punta', async () => {
   provider.onMessage(pipeline.handle)
   await provider.connect()
 
-  await provider.inject(mensaje())
+  await provider.inject(mensaje({ text: 'hola gente' }))
 
   const rows = await handle.sql<{ text: string; from_self: boolean }[]>`
     SELECT text, from_self FROM messages
@@ -2396,27 +2455,19 @@ import { runMigrations } from '../../src/store/migrate.ts'
 import { createIngestPipeline } from '../../src/capture/ingest.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
 import type { InboundMessage } from '../../src/domain/types.ts'
+import { mensaje } from '../helpers/fixtures.ts'
 
 const url = process.env.DATABASE_URL_TEST ?? 'postgres://bot:bot@localhost:5433/botwhatsapp_test'
 const handle = createDb(url)
 
 function conAudio(): InboundMessage {
-  return {
-    provider: 'fake',
+  return mensaje({
     externalId: 'm-audio',
-    conversation: { externalId: 'c1', kind: 'group', name: 'Grupo' },
-    sender: { externalId: 'p1', displayName: 'Ana' },
-    sentAt: new Date('2026-08-30T12:00:00Z'),
-    fromSelf: false,
     text: null,
-    subject: null,
-    threadExternalId: null,
-    replyToExternalId: null,
     attachments: [
       { externalId: 'a1', kind: 'audio', mimeType: 'audio/ogg', sizeBytes: 10, durationMs: 3000 },
     ],
-    raw: {},
-  }
+  })
 }
 
 beforeAll(async () => {
