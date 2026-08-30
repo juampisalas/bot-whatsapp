@@ -21,48 +21,51 @@ export async function insertMessage(
   db: Db,
   input: InsertMessageInput,
 ): Promise<{ id: string; inserted: boolean }> {
-  const inserted = await db
-    .insert(messages)
-    .values({
-      provider: input.provider,
-      externalId: input.externalId,
-      conversationId: input.conversationId,
-      participantId: input.participantId,
-      sentAt: input.sentAt,
-      fromSelf: input.fromSelf,
-      text: input.text,
-      subject: input.subject,
-      threadExternalId: input.threadExternalId,
-      replyToExternalId: input.replyToExternalId,
-      raw: input.raw,
-    })
-    .onConflictDoNothing({ target: [messages.provider, messages.externalId] })
-    .returning({ id: messages.id })
-
-  const nuevoId = inserted[0]?.id
-  if (nuevoId) {
-    // La expresión raw debe vincular el encoder de la columna; una interpolación directa entrega un Date sin codificar a postgres.js.
-    await db
-      .update(conversations)
-      .set({
-        lastMessageAt: sql`GREATEST(
-          COALESCE(${conversations.lastMessageAt}, ${sql.param(input.sentAt, conversations.lastMessageAt)}),
-          ${sql.param(input.sentAt, conversations.lastMessageAt)}
-        )`,
+  return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(messages)
+      .values({
+        provider: input.provider,
+        externalId: input.externalId,
+        conversationId: input.conversationId,
+        participantId: input.participantId,
+        sentAt: input.sentAt,
+        fromSelf: input.fromSelf,
+        text: input.text,
+        subject: input.subject,
+        threadExternalId: input.threadExternalId,
+        replyToExternalId: input.replyToExternalId,
+        raw: input.raw,
       })
-      .where(eq(conversations.id, input.conversationId))
-    return { id: nuevoId, inserted: true }
-  }
+      .onConflictDoNothing({ target: [messages.provider, messages.externalId] })
+      .returning({ id: messages.id })
 
-  const existente = await db
-    .select({ id: messages.id })
-    .from(messages)
-    .where(and(eq(messages.provider, input.provider), eq(messages.externalId, input.externalId)))
-    .limit(1)
+    const nuevoId = inserted[0]?.id
+    if (nuevoId) {
+      // El parámetro debe vincular la columna para seleccionar su encoder de timestamp antes de llegar a postgres.js.
+      await tx
+        .update(conversations)
+        .set({
+          lastMessageAt: sql`GREATEST(
+            COALESCE(${conversations.lastMessageAt}, ${sql.param(input.sentAt, conversations.lastMessageAt)}),
+            ${sql.param(input.sentAt, conversations.lastMessageAt)}
+          )`,
+        })
+        .where(eq(conversations.id, input.conversationId))
+      return { id: nuevoId, inserted: true }
+    }
 
-  const id = existente[0]?.id
-  if (!id) throw new Error('insertMessage no pudo resolver el mensaje existente')
-  return { id, inserted: false }
+    // La relectura concurrente depende del snapshot por sentencia de READ COMMITTED; un aislamiento más estricto podría ocultar al ganador.
+    const existente = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.provider, input.provider), eq(messages.externalId, input.externalId)))
+      .limit(1)
+
+    const id = existente[0]?.id
+    if (!id) throw new Error('insertMessage no pudo resolver el mensaje existente')
+    return { id, inserted: false }
+  })
 }
 
 export async function countMessagesInConversation(db: Db, conversationId: string): Promise<number> {
