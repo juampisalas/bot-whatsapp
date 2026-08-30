@@ -412,8 +412,10 @@ git commit -m "feat: Postgres con pgvector y cliente de base"
 - Create: `src/store/migrate.ts`
 - Test: `tests/store/schema.test.ts`
 
+**Orden:** esta tarea se implementa **después de la Task 4**, no antes. El esquema tipa sus columnas con las uniones de `src/domain/types.ts`, que crea la Task 4, así que invertir el orden rompe la compilación. La numeración se mantiene para no romper las referencias del resto del documento.
+
 **Interfaces:**
-- Consumes: `createDb` de Task 2
+- Consumes: `createDb` de Task 2, y los tipos `ProviderId`, `ConversationKind`, `AttachmentKind`, `CaptureMode` y `DownloadStatus` de Task 4
 - Produces: las tablas `conversations`, `participants`, `messages`, `attachments`, `capturePolicy`, `captureRules`, y la función `runMigrations(connectionString: string): Promise<void>`.
 
 Las columnas de valores acotados usan `text().$type<Union>()` con los tipos de unión de `src/domain/types.ts`, no `pgEnum`. Es lo que manda la skill de Drizzle del proyecto: un enum de Postgres necesita una migración para agregar un valor y es incómodo de renombrar o quitar, mientras un `text` tipado da la misma seguridad en TypeScript sin costo de migración. Además evita duplicar los valores entre el dominio y el esquema.
