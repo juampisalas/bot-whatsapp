@@ -1,0 +1,1 @@
+ALTER TABLE "capture_policy" ADD CONSTRAINT "capture_policy_id_must_be_one" CHECK ("capture_policy"."id" = 1);

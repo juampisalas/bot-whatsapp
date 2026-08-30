@@ -1,5 +1,7 @@
+import { sql } from 'drizzle-orm'
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -128,16 +130,20 @@ export const attachments = pgTable(
 )
 
 /**
- * Política de captura activa. Es una tabla de una sola fila: la clave
- * primaria fija en 1 es lo que impide que existan dos políticas en
- * conflicto. Es una excepción deliberada a la preferencia por claves
- * uuid, porque acá el objetivo es justamente que la fila sea única.
+ * Política de captura activa. Es una tabla de una sola fila: la restricción
+ * que exige id 1 impide que existan dos políticas en conflicto. Es una
+ * excepción deliberada a la preferencia por claves uuid, porque acá el
+ * objetivo es justamente que la fila sea única.
  */
-export const capturePolicy = pgTable('capture_policy', {
-  id: integer('id').primaryKey().default(1),
-  mode: text('mode').$type<CaptureMode>().notNull().default('all'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export const capturePolicy = pgTable(
+  'capture_policy',
+  {
+    id: integer('id').primaryKey().default(1),
+    mode: text('mode').$type<CaptureMode>().notNull().default('all'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check('capture_policy_id_must_be_one', sql`${t.id} = 1`)],
+)
 
 /**
  * Excepciones a la política activa. En modo whitelist son las únicas

@@ -8,6 +8,13 @@
       "when": 1788131787438,
       "tag": "0000_redundant_korath",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788132029625,
+      "tag": "0001_nasty_major_mapleleaf",
+      "breakpoints": true
     }
   ]
 }
