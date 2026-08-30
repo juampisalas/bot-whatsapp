@@ -1658,16 +1658,75 @@ export async function loadCapturePolicy(db: Db, provider: ProviderId): Promise<C
 }
 ```
 
-- [ ] **Step 5: Correr el test y verificar que pasa**
+- [ ] **Step 5: Testear la carga desde la base**
 
-Run: `bun test tests/capture/policy.test.ts`
-Expected: PASS, 4 tests.
+El test del paso 1 cubre solo la función pura. `loadCapturePolicy` concentra las dos decisiones que se rompen en silencio: el fallback de modo y el filtro por proveedor. Un fallback mal resuelto dejaría de capturar todo sin que falle nada.
 
-- [ ] **Step 6: Commitear**
+`capture_policy` es una tabla singleton, así que cada test tiene que limpiarla: una fila que sobreviva rompe los tests siguientes, tanto en este archivo como en otros.
+
+```ts
+// tests/store/capture-policy.test.ts
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
+import { createDb } from '../../src/store/client.ts'
+import { runMigrations } from '../../src/store/migrate.ts'
+import { loadCapturePolicy } from '../../src/store/repositories/capture-policy.ts'
+import { capturePolicy, captureRules } from '../../src/store/schema.ts'
+
+const url = process.env.DATABASE_URL_TEST ?? 'postgres://bot:bot@localhost:5433/botwhatsapp_test'
+const handle = createDb(url)
+
+async function cleanCapturePolicy(): Promise<void> {
+  await handle.sql`TRUNCATE capture_rules, capture_policy RESTART IDENTITY CASCADE`
+}
+
+beforeAll(async () => {
+  await runMigrations(url)
+})
+
+beforeEach(cleanCapturePolicy)
+afterEach(cleanCapturePolicy)
+
+afterAll(async () => {
+  await cleanCapturePolicy()
+  await handle.close()
+})
+
+test('sin fila de política usa el modo all', async () => {
+  const policy = await loadCapturePolicy(handle.db, 'fake')
+
+  expect(policy.mode).toBe('all')
+})
+
+test('lee el modo de la fila de política', async () => {
+  await handle.db.insert(capturePolicy).values({ mode: 'whitelist' })
+
+  const policy = await loadCapturePolicy(handle.db, 'fake')
+
+  expect(policy.mode).toBe('whitelist')
+})
+
+test('devuelve solo las reglas del proveedor solicitado', async () => {
+  await handle.db.insert(captureRules).values([
+    { provider: 'fake', conversationExternalId: 'fake-incluida' },
+    { provider: 'whatsapp', conversationExternalId: 'whatsapp-excluida' },
+  ])
+
+  const policy = await loadCapturePolicy(handle.db, 'fake')
+
+  expect(policy.rules).toEqual(new Set(['fake-incluida']))
+})
+```
+
+- [ ] **Step 6: Correr los tests y verificar que pasan**
+
+Run: `bun test tests/capture/policy.test.ts tests/store/capture-policy.test.ts`
+Expected: PASS, 7 tests.
+
+- [ ] **Step 7: Commitear**
 
 ```bash
 bun run typecheck
-git add src/capture/policy.ts src/store/repositories/capture-policy.ts tests/capture
+git add src/capture/policy.ts src/store/repositories/capture-policy.ts tests/capture tests/store/capture-policy.test.ts
 git commit -m "feat: política de captura con modos all, whitelist y blacklist"
 ```
 
