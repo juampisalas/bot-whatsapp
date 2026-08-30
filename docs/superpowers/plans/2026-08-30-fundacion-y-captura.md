@@ -110,6 +110,9 @@ data/
 .env.local
 *.log
 dist/
+
+# Espacio de trabajo temporal del flujo de ejecución por subagentes
+.superpowers/
 ```
 
 - [ ] **Step 4: Escribir `.env.example`**
