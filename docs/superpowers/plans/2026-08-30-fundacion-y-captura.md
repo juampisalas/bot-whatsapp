@@ -1010,19 +1010,17 @@ export class FakeProvider implements MessagingProvider {
     this.handler = handler
   }
 
-  /** Simula la llegada de un mensaje desde el canal. */
+  // Solo para tests: no forman parte del puerto MessagingProvider; no invocar desde producción.
   async inject(message: InboundMessage): Promise<void> {
     if (!this.connected) throw new Error('FakeProvider sin conectar')
     if (!this.handler) throw new Error('FakeProvider sin manejador registrado')
     await this.handler(message)
   }
 
-  /** Hace fallar el próximo envío, una única vez. */
   failNextSend(error: Error): void {
     this.nextSendError = error
   }
 
-  /** Registra conversaciones que devolverá `listConversations`. */
   seedConversations(items: ConversationSummary[]): void {
     this.conversations.splice(0, this.conversations.length, ...items)
   }
