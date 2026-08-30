@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Runtime y gestor de paquetes: Bun. Nunca `npm install` ni `npx` para dependencias del proyecto.
-- TypeScript en modo estricto. Prohibido `any` implícito o explícito salvo en el campo `raw`, que es `unknown`.
+- TypeScript en modo estricto. Prohibido `any`, implícito o explícito. El campo `raw` es `unknown`. Las aserciones de tipo se permiten únicamente en la frontera con Baileys, donde nuestros tipos neutrales se traducen a los suyos, y en ningún otro lugar.
 - Versión exacta de Baileys: `7.0.0-rc14`. No usar rango `^`, porque la `latest` publicada es un release candidate.
 - Dimensión del vector de embeddings: exactamente `768`. Corresponde a `embeddinggemma:300m`.
 - Zona horaria por defecto: `America/Argentina/Buenos_Aires`, configurable por entorno.
@@ -70,8 +70,8 @@
 ```bash
 cd /Users/juansalas/Desktop/bot-whatsapp
 bun init -y
-bun add baileys@7.0.0-rc14 drizzle-orm postgres zod
-bun add -d drizzle-kit @types/bun
+bun add baileys@7.0.0-rc14 drizzle-orm postgres zod qrcode-terminal
+bun add -d drizzle-kit @types/bun @types/qrcode-terminal
 ```
 
 - [ ] **Step 2: Escribir `tsconfig.json`**
@@ -644,7 +644,9 @@ git commit -m "feat: esquema de captura con columna vectorial de 768 dimensiones
 
 **Interfaces:**
 - Consumes: nada
-- Produces: los tipos `ProviderId`, `ConversationKind`, `ConversationRef`, `InboundAttachment`, `InboundMessage`, `OutboundContent`, `SentMessage`, `ConversationSummary`, `DownloadedMedia`; las interfaces `MessagingProvider` y `Logger`; la constante `silentLogger`; y la clase `FakeProvider` con los métodos extra de test `inject(message: InboundMessage): Promise<void>`, `get sent(): SentRecord[]`, `failNextSend(error: Error): void`.
+- Produces: los tipos `ProviderId`, `ConversationKind`, `ConversationRef`, `InboundAttachment`, `InboundMessage`, `OutboundContent`, `SentMessage`, `ConversationSummary`, `DownloadedMedia`; las interfaces `MessagingProvider` y `Logger`; la constante `silentLogger`; y la clase `FakeProvider` con los métodos extra de test `inject(message: InboundMessage): Promise<void>`, `get sent(): SentRecord[]`, `failNextSend(error: Error): void`, `seedConversations(items: ConversationSummary[]): void`.
+
+El puerto incluye `waitUntilReady(timeoutMs?: number)`, separado de `connect`, porque en WhatsApp conectar solo inicia el proceso: puede requerir que una persona escanee un QR antes de que exista sesión utilizable. Sin esta separación, quien consume el puerto termina adivinando con esperas fijas.
 
 `Logger` vive en `src/domain` y no en el módulo de captura. Si viviera en `capture/ingest.ts`, el adaptador de WhatsApp tendría que importar desde `capture` solo para tipar su log, lo que rompería la regla de que los proveedores no dependen de las capas de arriba.
 
@@ -746,6 +748,14 @@ export interface MessagingProvider {
    * internamente hace polling cumple el contrato igual.
    */
   connect(): Promise<void>
+
+  /**
+   * Resuelve cuando el canal está listo para operar. Existe porque
+   * `connect` solo inicia el proceso: en WhatsApp puede hacer falta que
+   * el usuario escanee un QR antes de que haya sesión utilizable.
+   * Rechaza si vence el tiempo o si la sesión quedó cerrada.
+   */
+  waitUntilReady(timeoutMs?: number): Promise<void>
 
   disconnect(): Promise<void>
 
@@ -853,6 +863,13 @@ test('rechaza inyectar antes de conectar', async () => {
   const provider = new FakeProvider()
   await expect(provider.inject(mensaje())).rejects.toThrow(/sin conectar/)
 })
+
+test('waitUntilReady resuelve una vez conectado y falla si no', async () => {
+  const provider = new FakeProvider()
+  await expect(provider.waitUntilReady()).rejects.toThrow(/sin conectar/)
+  await provider.connect()
+  await expect(provider.waitUntilReady()).resolves.toBeUndefined()
+})
 ```
 
 - [ ] **Step 5: Correr el test y verificar que falla**
@@ -896,6 +913,10 @@ export class FakeProvider implements MessagingProvider {
 
   async connect(): Promise<void> {
     this.connected = true
+  }
+
+  async waitUntilReady(): Promise<void> {
+    if (!this.connected) throw new Error('FakeProvider sin conectar')
   }
 
   async disconnect(): Promise<void> {
@@ -953,7 +974,7 @@ export class FakeProvider implements MessagingProvider {
 - [ ] **Step 7: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers/fake.test.ts`
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 8: Verificar tipos y commitear**
 
@@ -1460,7 +1481,7 @@ git commit -m "feat: buffer acotado con conteo de descartes"
 
 **Interfaces:**
 - Consumes: `MessagingProvider` y tipos de Task 4, repositorios de Task 5, `shouldCapture` y `CapturePolicy` de Task 6, `BoundedBuffer` de Task 7, `Db` de Task 2
-- Produces: `createIngestPipeline(deps: IngestDeps): { handle(message: InboundMessage): Promise<void>; flushBuffer(): Promise<number> }` donde `IngestDeps = { db: Db; policy: CapturePolicy; provider: MessagingProvider; mediaDir: string; bufferMax: number; log?: Logger }`.
+- Produces: `createIngestPipeline(deps: IngestDeps): { handle(message: InboundMessage): Promise<void>; flushBuffer(): Promise<number> }` donde `IngestDeps = { db: Db; policy: CapturePolicy; provider: MessagingProvider; bufferMax: number; log?: Logger }`. El pipeline no recibe `mediaDir`: las rutas locales las resuelve el proveedor, que es el único que sabe cómo nombrar sus archivos.
 
 Este es el test end-to-end de este plan: se inyecta un mensaje en el adaptador falso y se verifica que aparece en Postgres.
 
@@ -1514,7 +1535,6 @@ test('persiste un mensaje entrante de punta a punta', async () => {
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -1536,7 +1556,6 @@ test('no persiste conversaciones excluidas por la política', async () => {
     db: handle.db,
     policy: { mode: 'blacklist', rules: new Set(['c1']) },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -1554,7 +1573,6 @@ test('reentregar el mismo mensaje no lo duplica', async () => {
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -1573,7 +1591,6 @@ test('registra los adjuntos con estado pendiente', async () => {
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -1649,7 +1666,6 @@ export interface IngestDeps {
   db: Db
   policy: CapturePolicy
   provider: MessagingProvider
-  mediaDir: string
   bufferMax: number
   log?: Logger
 }
@@ -2100,6 +2116,7 @@ Expected: FAIL, no resuelve `registry.ts`.
 // src/providers/whatsapp/index.ts
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import qrcode from 'qrcode-terminal'
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
@@ -2133,6 +2150,8 @@ export class WhatsAppProvider implements MessagingProvider {
   private handler: InboundHandler | null = null
   private closing = false
   private reconnectDelayMs = 1_000
+  private open = false
+  private readyWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
 
@@ -2152,10 +2171,12 @@ export class WhatsAppProvider implements MessagingProvider {
     const { state, saveCreds } = await useMultiFileAuthState(this.options.authDir)
     const { version } = await fetchLatestBaileysVersion()
 
+    // No se pasa `printQRInTerminal`: está deprecado en esta versión, solo
+    // emite una advertencia y no dibuja nada. Baileys exige manejar el QR
+    // desde el evento `connection.update`, que es lo que se hace abajo.
     const socket = makeWASocket({
       auth: state,
       version,
-      printQRInTerminal: false,
       syncFullHistory: true,
     })
     this.socket = socket
@@ -2166,11 +2187,15 @@ export class WhatsAppProvider implements MessagingProvider {
 
     socket.ev.on('connection.update', (update) => {
       if (update.qr) {
-        this.log.info('escaneá este QR desde WhatsApp para vincular el dispositivo')
-        console.log(update.qr)
+        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
+        // `update.qr` es la carga cruda; hay que dibujarla para que sea
+        // escaneable. Imprimirla como texto no sirve.
+        qrcode.generate(update.qr, { small: true })
       }
       if (update.connection === 'open') {
         this.reconnectDelayMs = 1_000
+        this.open = true
+        for (const waiter of this.readyWaiters.splice(0)) waiter.resolve()
         this.log.info('conexión establecida con WhatsApp')
       }
       if (update.connection === 'close') {
@@ -2185,6 +2210,28 @@ export class WhatsAppProvider implements MessagingProvider {
     socket.ev.on('messaging-history.set', ({ messages }) => {
       void this.dispatch(messages)
     })
+  }
+
+  /**
+   * Espera a que la sesión esté utilizable. El tiempo por defecto es
+   * generoso porque la primera vez incluye que una persona escanee el QR.
+   */
+  async waitUntilReady(timeoutMs = 120_000): Promise<void> {
+    if (this.open) return
+    await new Promise<void>((resolve, reject) => {
+      const waiter = { resolve, reject }
+      this.readyWaiters.push(waiter)
+      setTimeout(() => {
+        const index = this.readyWaiters.indexOf(waiter)
+        if (index === -1) return
+        this.readyWaiters.splice(index, 1)
+        reject(new Error(`La conexión no estuvo lista en ${timeoutMs} ms`))
+      }, timeoutMs)
+    })
+  }
+
+  private failReadyWaiters(error: Error): void {
+    for (const waiter of this.readyWaiters.splice(0)) waiter.reject(error)
   }
 
   private async dispatch(waMessages: readonly unknown[]): Promise<void> {
@@ -2207,6 +2254,7 @@ export class WhatsAppProvider implements MessagingProvider {
   }
 
   private async handleClose(error: unknown): Promise<void> {
+    this.open = false
     if (this.closing) return
 
     const statusCode =
@@ -2219,6 +2267,7 @@ export class WhatsAppProvider implements MessagingProvider {
         'la sesión se cerró desde el teléfono: borrá el directorio de credenciales y volvé a vincular',
         { authDir: this.options.authDir },
       )
+      this.failReadyWaiters(new Error('La sesión de WhatsApp fue cerrada desde el teléfono'))
       return
     }
 
@@ -2231,6 +2280,8 @@ export class WhatsAppProvider implements MessagingProvider {
 
   async disconnect(): Promise<void> {
     this.closing = true
+    this.open = false
+    this.failReadyWaiters(new Error('Se cerró la conexión antes de estar lista'))
     this.socket?.end(undefined)
     this.socket = null
   }
@@ -2386,7 +2437,6 @@ test('marca el adjunto como descargado con su ruta local', async () => {
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -2410,7 +2460,6 @@ test('un fallo de descarga no impide guardar el mensaje', async () => {
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
     provider,
-    mediaDir: '/tmp/fake-media',
     bufferMax: 10,
   })
   provider.onMessage(pipeline.handle)
@@ -2657,7 +2706,7 @@ const comando = process.argv[2] ?? 'run'
 
 if (comando === 'list-conversations') {
   await provider.connect()
-  await new Promise((resolve) => setTimeout(resolve, 5_000))
+  await provider.waitUntilReady()
   for (const conversacion of await provider.listConversations()) {
     console.log(`${conversacion.externalId}\t${conversacion.name ?? '(sin nombre)'}`)
   }
@@ -2673,7 +2722,6 @@ const pipeline = createIngestPipeline({
   db,
   policy,
   provider,
-  mediaDir: config.MEDIA_DIR,
   bufferMax: config.CAPTURE_BUFFER_MAX,
   log,
 })
