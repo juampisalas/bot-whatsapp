@@ -281,7 +281,10 @@ services:
     ports:
       - '5433:5432'
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Postgres 18 movió PGDATA a /var/lib/postgresql/18/docker, así que el
+      # volumen va montado un nivel más arriba. Montarlo en .../data, como se
+      # hacía hasta la 17, hace fallar el arranque.
+      - pgdata:/var/lib/postgresql
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/10-init-db.sql:ro
     restart: unless-stopped
     healthcheck:
