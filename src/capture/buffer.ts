@@ -25,6 +25,15 @@ export class BoundedBuffer<T> {
     this.items.push(item)
   }
 
+  requeueFront(items: readonly T[]): void {
+    this.items.unshift(...items)
+    const overflow = this.items.length - this.limit
+    if (overflow > 0) {
+      this.items.splice(0, overflow)
+      this.droppedCount += overflow
+    }
+  }
+
   drain(): T[] {
     return this.items.splice(0, this.items.length)
   }

@@ -51,11 +51,73 @@ async function installInsertFailure(): Promise<void> {
   `
 }
 
-function createPipeline(log?: Logger) {
+async function removeAttachmentInsertFailure(): Promise<void> {
+  const triggerRows = await handle.sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger
+      WHERE tgname = 'fail_ingest_attachment_insert'
+        AND tgrelid = 'attachments'::regclass
+    ) AS exists
+  `
+  if (triggerRows[0]?.exists) {
+    await handle.sql`DROP TRIGGER fail_ingest_attachment_insert ON attachments`
+  }
+
+  const functionRows = await handle.sql<{ exists: boolean }[]>`
+    SELECT to_regprocedure('fail_ingest_attachment_insert()') IS NOT NULL AS exists
+  `
+  if (functionRows[0]?.exists) {
+    await handle.sql`DROP FUNCTION fail_ingest_attachment_insert()`
+  }
+}
+
+async function installAttachmentInsertFailure(): Promise<void> {
+  await handle.sql`
+    CREATE OR REPLACE FUNCTION fail_ingest_attachment_insert()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      RAISE EXCEPTION 'forced ingest attachment failure';
+    END;
+    $$
+  `
+  await handle.sql`
+    CREATE OR REPLACE TRIGGER fail_ingest_attachment_insert
+    BEFORE INSERT ON attachments
+    FOR EACH ROW
+    EXECUTE FUNCTION fail_ingest_attachment_insert()
+  `
+}
+
+async function installInterleavingFailure(): Promise<void> {
+  await handle.sql`
+    CREATE OR REPLACE FUNCTION fail_ingest_message_insert()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF NEW.external_id LIKE 'old-%' THEN
+        PERFORM pg_advisory_xact_lock(8308202601);
+      END IF;
+      RAISE EXCEPTION 'forced interleaving failure';
+    END;
+    $$
+  `
+  await handle.sql`
+    CREATE OR REPLACE TRIGGER fail_ingest_message_insert
+    BEFORE INSERT ON messages
+    FOR EACH ROW
+    EXECUTE FUNCTION fail_ingest_message_insert()
+  `
+}
+
+function createPipeline(log?: Logger, bufferMax = 10) {
   return createIngestPipeline({
     db: handle.db,
     policy: { mode: 'all', rules: new Set() },
-    bufferMax: 10,
+    bufferMax,
     log,
   })
 }
@@ -66,11 +128,13 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await removeInsertFailure()
+  await removeAttachmentInsertFailure()
   await handle.sql`TRUNCATE conversations, participants, messages, attachments RESTART IDENTITY CASCADE`
 })
 
 afterAll(async () => {
   await removeInsertFailure()
+  await removeAttachmentInsertFailure()
   await handle.sql`TRUNCATE conversations, participants, messages, attachments RESTART IDENTITY CASCADE`
   await handle.close()
 })
@@ -195,4 +259,74 @@ test('flushBuffer conserva el mensaje si el reintento también falla', async () 
   expect(await pipeline.flushBuffer()).toBe(1)
   const rows = await handle.db.select({ externalId: messages.externalId }).from(messages)
   expect(rows).toEqual([{ externalId: 'm-requeued' }])
+})
+
+test('flushBuffer repara adjuntos que fallaron después de persistir el mensaje', async () => {
+  const pipeline = createPipeline()
+  const message = mensaje({
+    externalId: 'm-attachment-recovery',
+    attachments: [
+      { externalId: 'a-recovered', kind: 'image', mimeType: 'image/jpeg', sizeBytes: 2048, durationMs: null },
+    ],
+  })
+  await installAttachmentInsertFailure()
+  try {
+    await pipeline.handle(message)
+    expect(await handle.db.select({ id: messages.id }).from(messages)).toHaveLength(1)
+    expect(await handle.db.select({ id: attachments.id }).from(attachments)).toHaveLength(0)
+  } finally {
+    await removeAttachmentInsertFailure()
+  }
+
+  expect(await pipeline.flushBuffer()).toBe(1)
+  expect(await handle.db.select({ id: messages.id }).from(messages)).toHaveLength(1)
+  const rows = await handle.db
+    .select({ externalId: attachments.externalId })
+    .from(attachments)
+  expect(rows).toEqual([{ externalId: 'a-recovered' }])
+})
+
+test('flushBuffer descarta reintentos viejos antes que llegadas nuevas', async () => {
+  const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = []
+  const log: Logger = {
+    info: () => {},
+    warn: (message, meta) => warnings.push({ message, meta }),
+    error: () => {},
+  }
+  const pipeline = createPipeline(log, 2)
+  await installInterleavingFailure()
+  await pipeline.handle(mensaje({ externalId: 'old-a' }))
+  await pipeline.handle(mensaje({ externalId: 'old-b' }))
+
+  let flushed = -1
+  await handle.sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_lock(8308202601)`
+    const inFlight = pipeline.flushBuffer()
+    try {
+      await Promise.all([
+        pipeline.handle(mensaje({ externalId: 'new-c' })),
+        pipeline.handle(mensaje({ externalId: 'new-d' })),
+      ])
+    } finally {
+      await tx`SELECT pg_advisory_unlock(8308202601)`
+    }
+    flushed = await inFlight
+  })
+  await removeInsertFailure()
+
+  expect(flushed).toBe(0)
+  expect(await pipeline.flushBuffer()).toBe(2)
+  const rows = await handle.db
+    .select({ externalId: messages.externalId })
+    .from(messages)
+    .orderBy(messages.externalId)
+  expect(rows).toEqual([{ externalId: 'new-c' }, { externalId: 'new-d' }])
+  expect(
+    warnings.some(
+      (entry) =>
+        entry.message === 'buffer descartó mensajes al reintentar' &&
+        entry.meta?.enBuffer === 2 &&
+        entry.meta?.descartados === 2,
+    ),
+  ).toBe(true)
 })

@@ -47,3 +47,41 @@ test('vaciar un buffer vacío devuelve una lista vacía y permite reutilizarlo',
   buffer.push(1)
   expect(buffer.drain()).toEqual([1])
 })
+
+test('requeueFront preserva el orden relativo del lote', () => {
+  const buffer = new BoundedBuffer<number>(5)
+
+  buffer.requeueFront([1, 2, 3])
+
+  expect(buffer.drain()).toEqual([1, 2, 3])
+})
+
+test('requeueFront ubica el lote antes de los elementos existentes', () => {
+  const buffer = new BoundedBuffer<number>(5)
+  buffer.push(3)
+  buffer.push(4)
+
+  buffer.requeueFront([1, 2])
+
+  expect(buffer.drain()).toEqual([1, 2, 3, 4])
+})
+
+test('requeueFront descarta los más antiguos del frente y los cuenta', () => {
+  const buffer = new BoundedBuffer<number>(3)
+  buffer.push(3)
+  buffer.push(4)
+
+  buffer.requeueFront([1, 2])
+
+  expect(buffer.drain()).toEqual([2, 3, 4])
+  expect(buffer.dropped).toBe(1)
+})
+
+test('requeueFront con un lote mayor al límite conserva los más nuevos', () => {
+  const buffer = new BoundedBuffer<number>(2)
+
+  buffer.requeueFront([1, 2, 3, 4])
+
+  expect(buffer.drain()).toEqual([3, 4])
+  expect(buffer.dropped).toBe(2)
+})

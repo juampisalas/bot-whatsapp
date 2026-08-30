@@ -38,7 +38,7 @@ export function createIngestPipeline(deps: IngestDeps) {
         })
       : null
 
-    const { id, inserted } = await insertMessage(deps.db, {
+    const { id } = await insertMessage(deps.db, {
       provider: message.provider,
       externalId: message.externalId,
       conversationId,
@@ -52,9 +52,8 @@ export function createIngestPipeline(deps: IngestDeps) {
       raw: message.raw,
     })
 
-    if (inserted) {
-      await insertAttachments(deps.db, id, message.attachments)
-    }
+    // La escritura idempotente incondicional repara metadatos faltantes tras un commit parcial o una reentrega.
+    await insertAttachments(deps.db, id, message.attachments)
   }
 
   async function handle(message: InboundMessage): Promise<void> {
@@ -76,6 +75,7 @@ export function createIngestPipeline(deps: IngestDeps) {
   /** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */
   async function flushBuffer(): Promise<number> {
     const pendientes = buffer.drain()
+    const fallidos: InboundMessage[] = []
     let persistidos = 0
 
     for (const message of pendientes) {
@@ -83,10 +83,18 @@ export function createIngestPipeline(deps: IngestDeps) {
         await persist(message)
         persistidos += 1
       } catch {
-        buffer.push(message)
+        fallidos.push(message)
       }
     }
 
+    const descartadosAntes = buffer.dropped
+    buffer.requeueFront(fallidos)
+    if (buffer.dropped > descartadosAntes) {
+      log.warn('buffer descartó mensajes al reintentar', {
+        enBuffer: buffer.size,
+        descartados: buffer.dropped,
+      })
+    }
     if (persistidos > 0) log.info('buffer vaciado', { persistidos })
     return persistidos
   }
