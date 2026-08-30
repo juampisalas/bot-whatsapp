@@ -640,12 +640,13 @@ export const attachments = pgTable(
 )
 
 /**
- * Política de captura activa. Es una tabla de una sola fila: la restricción
- * que exige id 1 impide que existan dos políticas en conflicto. Un
- * `default(1)` no alcanza, porque solo aporta el valor cuando el insert lo
- * omite y no evita que alguien inserte id 2. Es una excepción deliberada a
- * la preferencia por claves uuid, porque acá el objetivo es justamente que
- * la fila sea única.
+ * Política de captura activa. Es una tabla de una sola fila, y hacen falta
+ * las dos restricciones juntas para garantizarlo: el check limita `id` al
+ * valor 1 y la clave primaria impide que ese valor se repita. Un `default(1)`
+ * no alcanza, porque solo aporta el valor cuando el insert lo omite y no
+ * evita que alguien inserte id 2. Es una excepción deliberada a la
+ * preferencia por claves uuid, porque acá el objetivo es justamente que la
+ * fila sea única.
  */
 export const capturePolicy = pgTable(
   'capture_policy',
