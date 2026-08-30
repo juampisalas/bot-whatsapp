@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: botwhatsapp-postgres
+    environment:
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+      POSTGRES_DB: botwhatsapp
+    ports:
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/10-init-db.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U bot -d botwhatsapp']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
