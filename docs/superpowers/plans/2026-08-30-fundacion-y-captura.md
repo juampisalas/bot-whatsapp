@@ -1744,6 +1744,8 @@ git commit -m "feat: política de captura con modos all, whitelist y blacklist"
 
 Al llenarse descarta el elemento más antiguo y lleva la cuenta de descartes, que es lo que después se registra en el log. El límite viene de `CAPTURE_BUFFER_MAX`, mil por defecto.
 
+`dropped` es un total acumulado de por vida, no por vaciado: `drain()` no lo resetea, porque el pipeline lo usa para reportar cuánto se perdió desde que arrancó el proceso.
+
 - [ ] **Step 1: Escribir el test que falla**
 
 ```ts
@@ -1769,8 +1771,31 @@ test('descarta los más antiguos al superar el límite y los cuenta', () => {
   expect(buffer.dropped).toBe(1)
 })
 
-test('rechaza un límite no positivo', () => {
-  expect(() => new BoundedBuffer<number>(0)).toThrow(/positivo/)
+test.each([0, -1, 1.5])('rechaza el límite inválido %p', (limit) => {
+  expect(() => new BoundedBuffer<number>(limit)).toThrow(/entero positivo/)
+})
+
+test('mantiene el total acumulado de descartes después de vaciarse', () => {
+  const buffer = new BoundedBuffer<number>(1)
+  buffer.push(1)
+  buffer.push(2)
+  expect(buffer.dropped).toBe(1)
+
+  buffer.drain()
+  buffer.push(3)
+  buffer.push(4)
+
+  expect(buffer.dropped).toBe(2)
+})
+
+test('vaciar un buffer vacío devuelve una lista vacía y permite reutilizarlo', () => {
+  const buffer = new BoundedBuffer<number>(2)
+
+  expect(buffer.drain()).toEqual([])
+  expect(buffer.size).toBe(0)
+
+  buffer.push(1)
+  expect(buffer.drain()).toEqual([1])
 })
 ```
 
@@ -1818,7 +1843,7 @@ export class BoundedBuffer<T> {
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
 Run: `bun test tests/capture/buffer.test.ts`
-Expected: PASS, 3 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commitear**
 
