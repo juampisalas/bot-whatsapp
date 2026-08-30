@@ -1117,13 +1117,21 @@ git commit -m "feat: tipos de dominio, puerto de mensajería y adaptador falso"
 
 `insertMessage` es idempotente: si el par proveedor e id externo ya existe, no duplica y devuelve `inserted: false`. Esto importa porque el history sync de WhatsApp reentrega mensajes que ya se recibieron en vivo.
 
+Tres correcciones surgieron al implementar esta tarea y valen para las que siguen:
+
+1. **El insert y la actualización de `lastMessageAt` van en una transacción.** Como sentencias separadas, un fallo entre ambas dejaba el mensaje persistido pero hacía fallar la función, y el retry devolvía `inserted: false` para siempre: el llamador nunca insertaba los adjuntos de ese mensaje. La relectura del conflicto dentro de la transacción depende de `READ COMMITTED`, el default de Postgres; un aislamiento más estricto mantendría el snapshot viejo y no vería al ganador.
+2. **Interpolar un `Date` en un template `sql` de Drizzle no aplica el encoder de la columna.** El driver recibe el `Date` sin codificar y falla. Hay que envolverlo en `sql.param(valor, columna)`. El `COALESCE` dentro del `GREATEST` sí es necesario y no es el que prohíbe la skill de Drizzle: `lastMessageAt` es nullable y `GREATEST` con un operando NULL devuelve NULL, lo que borraría el timestamp.
+3. **En los tests, leer timestamps con `handle.sql` crudo devuelve strings, no `Date`.** `drizzle()` reemplaza los parsers del cliente postgres.js para los OID de fecha (1082, 1083, 1114, 1184) por funciones identidad, porque hace su propio mapeo por columna, y esa mutación afecta al cliente compartido. Los tests leen con `db.select()`, que aplica el decoder de la columna. Las columnas de texto, booleanos y enteros no están afectadas.
+
 - [ ] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/store/repositories.test.ts
 import { test, expect, beforeAll, afterAll } from 'bun:test'
+import { eq } from 'drizzle-orm'
 import { createDb } from '../../src/store/client.ts'
 import { runMigrations } from '../../src/store/migrate.ts'
+import { conversations, participants } from '../../src/store/schema.ts'
 import { upsertConversation, upsertParticipant } from '../../src/store/repositories/conversations.ts'
 import { countMessagesInConversation, insertMessage } from '../../src/store/repositories/messages.ts'
 
@@ -1136,52 +1144,103 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await handle.sql`DROP TRIGGER IF EXISTS fail_atomic_message_update ON conversations`
+  await handle.sql`DROP FUNCTION IF EXISTS fail_atomic_message_update()`
+  await handle.sql`TRUNCATE conversations, participants, messages, attachments RESTART IDENTITY CASCADE`
   await handle.close()
 })
 
 test('upsertConversation devuelve el mismo id al repetir', async () => {
   const primero = await upsertConversation(handle.db, {
     provider: 'fake',
-    externalId: 'c1',
+    externalId: 'conversation-repeated-id',
     kind: 'group',
     name: 'Grupo Facu',
   })
   const segundo = await upsertConversation(handle.db, {
     provider: 'fake',
-    externalId: 'c1',
+    externalId: 'conversation-repeated-id',
     kind: 'group',
     name: 'Grupo Facu Renombrado',
   })
   expect(segundo).toBe(primero)
 })
 
-test('upsertConversation actualiza el nombre', async () => {
-  const id = await upsertConversation(handle.db, {
+test('upsertConversation actualiza valores y preserva el nombre ante null', async () => {
+  const primero = await upsertConversation(handle.db, {
     provider: 'fake',
-    externalId: 'c1',
+    externalId: 'conversation-conditional-update',
     kind: 'group',
+    name: 'Nombre Inicial',
+  })
+  const segundo = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'conversation-conditional-update',
+    kind: 'dm',
     name: 'Nombre Final',
   })
-  const rows = await handle.sql<{ name: string }[]>`SELECT name FROM conversations WHERE id = ${id}`
+  // El kind final difiere del inicial a propósito: si el upsert dejara de actualizarlo, la aserción fallaría.
+  const tercero = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'conversation-conditional-update',
+    kind: 'dm',
+    name: null,
+  })
+
+  const rows = await handle.db
+    .select({ kind: conversations.kind, name: conversations.name })
+    .from(conversations)
+    .where(eq(conversations.id, primero))
+
+  expect(segundo).toBe(primero)
+  expect(tercero).toBe(primero)
+  expect(rows[0]?.kind).toBe('dm')
   expect(rows[0]?.name).toBe('Nombre Final')
+})
+
+test('upsertParticipant preserva id y nombre ante displayName null', async () => {
+  const primero = await upsertParticipant(handle.db, {
+    provider: 'fake',
+    externalId: 'participant-conditional-update',
+    displayName: 'Ana',
+  })
+  const segundo = await upsertParticipant(handle.db, {
+    provider: 'fake',
+    externalId: 'participant-conditional-update',
+    displayName: 'Ana Actualizada',
+  })
+  const tercero = await upsertParticipant(handle.db, {
+    provider: 'fake',
+    externalId: 'participant-conditional-update',
+    displayName: null,
+  })
+
+  const rows = await handle.db
+    .select({ displayName: participants.displayName })
+    .from(participants)
+    .where(eq(participants.id, primero))
+
+  expect(segundo).toBe(primero)
+  expect(tercero).toBe(primero)
+  expect(rows[0]?.displayName).toBe('Ana Actualizada')
 })
 
 test('insertMessage no duplica el mismo id externo', async () => {
   const conversationId = await upsertConversation(handle.db, {
     provider: 'fake',
-    externalId: 'c2',
+    externalId: 'conversation-sequential-idempotency',
     kind: 'dm',
     name: null,
   })
   const participantId = await upsertParticipant(handle.db, {
     provider: 'fake',
-    externalId: 'p1',
+    externalId: 'participant-message-author',
     displayName: 'Ana',
   })
 
   const entrada = {
     provider: 'fake' as const,
-    externalId: 'm1',
+    externalId: 'message-sequential-idempotency',
     conversationId,
     participantId,
     sentAt: new Date('2026-08-30T12:00:00Z'),
@@ -1202,16 +1261,47 @@ test('insertMessage no duplica el mismo id externo', async () => {
   expect(await countMessagesInConversation(handle.db, conversationId)).toBe(1)
 })
 
-test('insertMessage actualiza lastMessageAt de la conversación', async () => {
+test('insertMessage resuelve entregas concurrentes sin duplicar', async () => {
   const conversationId = await upsertConversation(handle.db, {
     provider: 'fake',
-    externalId: 'c3',
+    externalId: 'conversation-concurrent-idempotency',
+    kind: 'group',
+    name: 'Concurrente',
+  })
+  const entrada = {
+    provider: 'fake' as const,
+    externalId: 'message-concurrent-idempotency',
+    conversationId,
+    participantId: null,
+    sentAt: new Date('2026-08-30T13:00:00Z'),
+    fromSelf: false,
+    text: 'simultáneo',
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  }
+
+  const resultados = await Promise.all([
+    insertMessage(handle.db, entrada),
+    insertMessage(handle.db, entrada),
+  ])
+
+  expect(resultados.filter((resultado) => resultado.inserted)).toHaveLength(1)
+  expect(resultados[0]?.id).toBe(resultados[1]?.id)
+  expect(await countMessagesInConversation(handle.db, conversationId)).toBe(1)
+})
+
+test('insertMessage inicializa lastMessageAt y no lo mueve hacia atrás', async () => {
+  const conversationId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'conversation-monotonic-activity',
     kind: 'group',
     name: 'Otro',
   })
-  await insertMessage(handle.db, {
+  const nuevo = await insertMessage(handle.db, {
     provider: 'fake',
-    externalId: 'm2',
+    externalId: 'message-newer',
     conversationId,
     participantId: null,
     sentAt: new Date('2026-08-30T15:00:00Z'),
@@ -1222,10 +1312,83 @@ test('insertMessage actualiza lastMessageAt de la conversación', async () => {
     replyToExternalId: null,
     raw: null,
   })
-  const rows = await handle.sql<{ last_message_at: Date }[]>`
-    SELECT last_message_at FROM conversations WHERE id = ${conversationId}
+  const inicial = await handle.db
+    .select({ lastMessageAt: conversations.lastMessageAt })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+
+  const viejo = await insertMessage(handle.db, {
+    provider: 'fake',
+    externalId: 'message-older',
+    conversationId,
+    participantId: null,
+    sentAt: new Date('2026-08-30T10:00:00Z'),
+    fromSelf: false,
+    text: 'histórico',
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  })
+  const rows = await handle.db
+    .select({ lastMessageAt: conversations.lastMessageAt })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+
+  expect(nuevo.inserted).toBe(true)
+  expect(inicial[0]?.lastMessageAt?.toISOString()).toBe('2026-08-30T15:00:00.000Z')
+  expect(viejo.inserted).toBe(true)
+  expect(rows[0]?.lastMessageAt?.toISOString()).toBe('2026-08-30T15:00:00.000Z')
+})
+
+test('insertMessage revierte el insert si falla la actualización de actividad', async () => {
+  const conversationId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'atomic-failure-conversation',
+    kind: 'group',
+    name: 'Falla atómica',
+  })
+  await handle.sql`
+    CREATE OR REPLACE FUNCTION fail_atomic_message_update()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      RAISE EXCEPTION 'forced activity update failure';
+    END;
+    $$
   `
-  expect(rows[0]?.last_message_at.toISOString()).toBe('2026-08-30T15:00:00.000Z')
+  // `OR REPLACE` porque un run abortado antes de la limpieza dejaría el trigger vivo y haría fallar todos los runs siguientes.
+  await handle.sql`
+    CREATE OR REPLACE TRIGGER fail_atomic_message_update
+    BEFORE UPDATE ON conversations
+    FOR EACH ROW
+    WHEN (NEW.external_id = 'atomic-failure-conversation')
+    EXECUTE FUNCTION fail_atomic_message_update()
+  `
+
+  const fallo = await insertMessage(handle.db, {
+    provider: 'fake',
+    externalId: 'message-atomic-failure',
+    conversationId,
+    participantId: null,
+    sentAt: new Date('2026-08-30T16:00:00Z'),
+    fromSelf: false,
+    text: 'debe revertirse',
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  }).then(
+    () => null,
+    (error: unknown) => error,
+  )
+
+  // Drizzle envuelve el error del driver, así que el mensaje del trigger llega en `cause`.
+  // Sin esta aserción el test pasaría ante cualquier fallo previo al update, sin probar el rollback.
+  const causa = (fallo as { cause?: { message?: string } } | null)?.cause
+  expect(causa?.message).toBe('forced activity update failure')
+  expect(await countMessagesInConversation(handle.db, conversationId)).toBe(0)
 })
 ```
 
@@ -1328,42 +1491,51 @@ export async function insertMessage(
   db: Db,
   input: InsertMessageInput,
 ): Promise<{ id: string; inserted: boolean }> {
-  const inserted = await db
-    .insert(messages)
-    .values({
-      provider: input.provider,
-      externalId: input.externalId,
-      conversationId: input.conversationId,
-      participantId: input.participantId,
-      sentAt: input.sentAt,
-      fromSelf: input.fromSelf,
-      text: input.text,
-      subject: input.subject,
-      threadExternalId: input.threadExternalId,
-      replyToExternalId: input.replyToExternalId,
-      raw: input.raw,
-    })
-    .onConflictDoNothing({ target: [messages.provider, messages.externalId] })
-    .returning({ id: messages.id })
+  return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(messages)
+      .values({
+        provider: input.provider,
+        externalId: input.externalId,
+        conversationId: input.conversationId,
+        participantId: input.participantId,
+        sentAt: input.sentAt,
+        fromSelf: input.fromSelf,
+        text: input.text,
+        subject: input.subject,
+        threadExternalId: input.threadExternalId,
+        replyToExternalId: input.replyToExternalId,
+        raw: input.raw,
+      })
+      .onConflictDoNothing({ target: [messages.provider, messages.externalId] })
+      .returning({ id: messages.id })
 
-  const nuevoId = inserted[0]?.id
-  if (nuevoId) {
-    await db
-      .update(conversations)
-      .set({ lastMessageAt: sql`GREATEST(COALESCE(${conversations.lastMessageAt}, ${input.sentAt}), ${input.sentAt})` })
-      .where(eq(conversations.id, input.conversationId))
-    return { id: nuevoId, inserted: true }
-  }
+    const nuevoId = inserted[0]?.id
+    if (nuevoId) {
+      // El parámetro debe vincular la columna para seleccionar su encoder de timestamp antes de llegar a postgres.js.
+      await tx
+        .update(conversations)
+        .set({
+          lastMessageAt: sql`GREATEST(
+            COALESCE(${conversations.lastMessageAt}, ${sql.param(input.sentAt, conversations.lastMessageAt)}),
+            ${sql.param(input.sentAt, conversations.lastMessageAt)}
+          )`,
+        })
+        .where(eq(conversations.id, input.conversationId))
+      return { id: nuevoId, inserted: true }
+    }
 
-  const existente = await db
-    .select({ id: messages.id })
-    .from(messages)
-    .where(and(eq(messages.provider, input.provider), eq(messages.externalId, input.externalId)))
-    .limit(1)
+    // La relectura concurrente depende del snapshot por sentencia de READ COMMITTED; un aislamiento más estricto podría ocultar al ganador.
+    const existente = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.provider, input.provider), eq(messages.externalId, input.externalId)))
+      .limit(1)
 
-  const id = existente[0]?.id
-  if (!id) throw new Error('insertMessage no pudo resolver el mensaje existente')
-  return { id, inserted: false }
+    const id = existente[0]?.id
+    if (!id) throw new Error('insertMessage no pudo resolver el mensaje existente')
+    return { id, inserted: false }
+  })
 }
 
 export async function countMessagesInConversation(db: Db, conversationId: string): Promise<number> {
@@ -1378,7 +1550,7 @@ export async function countMessagesInConversation(db: Db, conversationId: string
 - [ ] **Step 5: Correr el test y verificar que pasa**
 
 Run: `bun test tests/store/repositories.test.ts`
-Expected: PASS, 4 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 6: Verificar tipos y commitear**
 
