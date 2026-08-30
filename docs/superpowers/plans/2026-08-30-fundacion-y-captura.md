@@ -429,6 +429,7 @@ Solo se crean las tablas que este plan necesita. Las de resúmenes, preferencias
 import { test, expect, beforeAll, afterAll } from 'bun:test'
 import { createDb } from '../../src/store/client.ts'
 import { runMigrations } from '../../src/store/migrate.ts'
+import { conversations, messages } from '../../src/store/schema.ts'
 
 const url = process.env.DATABASE_URL_TEST ?? 'postgres://bot:bot@localhost:5433/botwhatsapp_test'
 const handle = createDb(url)
@@ -441,21 +442,22 @@ afterAll(async () => {
   await handle.close()
 })
 
-test('existen todas las tablas del plan', async () => {
+// Compara el conjunto exacto, no solo la inclusión: este plan crea seis
+// tablas y ninguna más, así que una séptima es una violación de alcance que
+// el test tiene que detectar. La tabla de control de migraciones de Drizzle
+// vive en el esquema `drizzle`, no en `public`, así que no interfiere.
+test('existen exactamente las seis tablas del plan', async () => {
   const rows = await handle.sql<{ table_name: string }[]>`
     SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
   `
-  const names = rows.map((r) => r.table_name)
-  for (const expected of [
-    'conversations',
-    'participants',
-    'messages',
+  expect(rows.map((r) => r.table_name).sort()).toEqual([
     'attachments',
     'capture_policy',
     'capture_rules',
-  ]) {
-    expect(names).toContain(expected)
-  }
+    'conversations',
+    'messages',
+    'participants',
+  ])
 })
 
 test('la columna embedding tiene 768 dimensiones', async () => {
@@ -466,12 +468,34 @@ test('la columna embedding tiene 768 dimensiones', async () => {
   expect(rows[0]?.atttypmod).toBe(768)
 })
 
-test('un mensaje es único por proveedor e id externo', async () => {
-  const rows = await handle.sql<{ indexdef: string }[]>`
-    SELECT indexdef FROM pg_indexes
-    WHERE tablename = 'messages' AND indexname = 'messages_provider_external_id_idx'
-  `
-  expect(rows[0]?.indexdef).toContain('UNIQUE')
+// Este test inserta un duplicado de verdad en lugar de leer el catálogo:
+// que el índice diga UNIQUE no prueba que la base rechace el segundo insert,
+// y esa garantía es la que sostiene la ingesta idempotente.
+test('la base rechaza dos mensajes con el mismo proveedor e id externo', async () => {
+  await handle.sql`TRUNCATE attachments, messages, conversations RESTART IDENTITY CASCADE`
+
+  const [conversacion] = await handle.db
+    .insert(conversations)
+    .values({ provider: 'whatsapp', externalId: 'c-dup', kind: 'group' })
+    .returning({ id: conversations.id })
+  if (!conversacion) throw new Error('no se creó la conversación de prueba')
+
+  const duplicado = {
+    provider: 'whatsapp' as const,
+    externalId: 'm-dup',
+    conversationId: conversacion.id,
+    sentAt: new Date('2026-01-01T00:00:00Z'),
+    fromSelf: false,
+  }
+
+  await handle.db.insert(messages).values(duplicado)
+  await expect(handle.db.insert(messages).values(duplicado)).rejects.toThrow()
+})
+
+test('la base rechaza una segunda política de captura', async () => {
+  await expect(
+    handle.sql`INSERT INTO capture_policy (id, mode) VALUES (2, 'all')`,
+  ).rejects.toThrow()
 })
 ```
 
@@ -484,8 +508,10 @@ Expected: FAIL, no resuelve `../../src/store/migrate.ts`.
 
 ```ts
 // src/store/schema.ts
+import { sql } from 'drizzle-orm'
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -614,16 +640,22 @@ export const attachments = pgTable(
 )
 
 /**
- * Política de captura activa. Es una tabla de una sola fila: la clave
- * primaria fija en 1 es lo que impide que existan dos políticas en
- * conflicto. Es una excepción deliberada a la preferencia por claves
- * uuid, porque acá el objetivo es justamente que la fila sea única.
+ * Política de captura activa. Es una tabla de una sola fila: la restricción
+ * que exige id 1 impide que existan dos políticas en conflicto. Un
+ * `default(1)` no alcanza, porque solo aporta el valor cuando el insert lo
+ * omite y no evita que alguien inserte id 2. Es una excepción deliberada a
+ * la preferencia por claves uuid, porque acá el objetivo es justamente que
+ * la fila sea única.
  */
-export const capturePolicy = pgTable('capture_policy', {
-  id: integer('id').primaryKey().default(1),
-  mode: text('mode').$type<CaptureMode>().notNull().default('all'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
+export const capturePolicy = pgTable(
+  'capture_policy',
+  {
+    id: integer('id').primaryKey().default(1),
+    mode: text('mode').$type<CaptureMode>().notNull().default('all'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check('capture_policy_id_must_be_one', sql`${t.id} = 1`)],
+)
 
 /**
  * Excepciones a la política activa. En modo whitelist son las únicas
