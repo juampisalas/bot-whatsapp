@@ -50,10 +50,11 @@ test('upsertConversation actualiza valores y preserva el nombre ante null', asyn
     kind: 'dm',
     name: 'Nombre Final',
   })
+  // El kind final difiere del inicial a propósito: si el upsert dejara de actualizarlo, la aserción fallaría.
   const tercero = await upsertConversation(handle.db, {
     provider: 'fake',
     externalId: 'conversation-conditional-update',
-    kind: 'group',
+    kind: 'dm',
     name: null,
   })
 
@@ -64,7 +65,7 @@ test('upsertConversation actualiza valores y preserva el nombre ante null', asyn
 
   expect(segundo).toBe(primero)
   expect(tercero).toBe(primero)
-  expect(rows[0]?.kind).toBe('group')
+  expect(rows[0]?.kind).toBe('dm')
   expect(rows[0]?.name).toBe('Nombre Final')
 })
 
@@ -237,21 +238,26 @@ test('insertMessage revierte el insert si falla la actualización de actividad',
     EXECUTE FUNCTION fail_atomic_message_update()
   `
 
-  await expect(
-    insertMessage(handle.db, {
-      provider: 'fake',
-      externalId: 'message-atomic-failure',
-      conversationId,
-      participantId: null,
-      sentAt: new Date('2026-08-30T16:00:00Z'),
-      fromSelf: false,
-      text: 'debe revertirse',
-      subject: null,
-      threadExternalId: null,
-      replyToExternalId: null,
-      raw: null,
-    }),
-  ).rejects.toThrow()
+  const fallo = await insertMessage(handle.db, {
+    provider: 'fake',
+    externalId: 'message-atomic-failure',
+    conversationId,
+    participantId: null,
+    sentAt: new Date('2026-08-30T16:00:00Z'),
+    fromSelf: false,
+    text: 'debe revertirse',
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  }).then(
+    () => null,
+    (error: unknown) => error,
+  )
 
+  // Drizzle envuelve el error del driver, así que el mensaje del trigger llega en `cause`.
+  // Sin esta aserción el test pasaría ante cualquier fallo previo al update, sin probar el rollback.
+  const causa = (fallo as { cause?: { message?: string } } | null)?.cause
+  expect(causa?.message).toBe('forced activity update failure')
   expect(await countMessagesInConversation(handle.db, conversationId)).toBe(0)
 })
