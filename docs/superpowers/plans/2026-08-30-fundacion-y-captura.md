@@ -359,8 +359,18 @@ import { drizzle } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
 import * as schema from './schema.ts'
 
+// El DDL idempotente de las migraciones responde con avisos de "ya existe"
+// que solo generarían ruido. Se filtran esos códigos y se deja pasar el
+// resto, para no quedar ciegos ante una advertencia real.
+const AVISOS_BENIGNOS = new Set(['42710', '42P06', '42P07'])
+
+function manejarAviso(aviso: postgres.Notice): void {
+  if (aviso.code && AVISOS_BENIGNOS.has(aviso.code)) return
+  console.warn(aviso.message)
+}
+
 export function createDb(connectionString: string) {
-  const sql = postgres(connectionString, { max: 10, onnotice: () => {} })
+  const sql = postgres(connectionString, { max: 10, onnotice: manejarAviso })
   const db = drizzle(sql, { schema })
   return {
     db,
