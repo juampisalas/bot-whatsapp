@@ -1,0 +1,31 @@
+{
+  "name": "bot-whatsapp",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "drizzle-kit": "^0.31.10"
+  },
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/store/migrate.ts"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.5.4"
+  }
+}
