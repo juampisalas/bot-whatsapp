@@ -52,13 +52,20 @@ reconstruirlo.
 ### Modelos
 
 El modelo de generación se define por entorno mediante `LLM_MODEL`. Para la
-máquina de desarrollo (MacBook Pro M4 Pro, 48 GB de memoria unificada) el
-default es Qwen 3.6 en su variante MoE de 35B con 3B activos, elegida porque
-procesa prompts largos notablemente más rápido que una densa equivalente, y el
-cuello de botella de esta carga es justamente procesar transcripciones largas.
-La densa de 27B en Q4_K_M queda documentada como alternativa si la MoE no
-rinde. Lo único pendiente de verificar es la cadena exacta del tag en el
-registro de Ollama, que se chequea antes de escribir la configuración.
+máquina de desarrollo (MacBook Pro M4 Pro, 48 GB de memoria unificada, 37.4 GiB
+disponibles para Metal) el default es **`qwen3.6:35b-a3b`**, la variante MoE de
+35B con 3B activos, elegida porque activa una fracción de los parámetros por
+token y por lo tanto procesa prompts largos mucho más rápido que una densa
+equivalente. El cuello de botella de esta carga es justamente procesar
+transcripciones largas.
+
+Alternativas verificadas en el registro de Ollama, documentadas por si la MoE no
+rinde: `qwen3.6:27b-q4_K_M`, la densa de la misma generación, y `qwen3.8:27b`,
+que es de generación posterior pero solo existe en variantes densas de 27B. La
+comparación entre estas tres es una tarea de ajuste, no un bloqueante.
+
+El modelo de embeddings es **`embeddinggemma:300m`**, con 768 dimensiones, que es
+la cifra fijada en el esquema.
 
 Ajustes de entorno de Ollama que importan para contexto largo:
 
@@ -66,11 +73,9 @@ Ajustes de entorno de Ollama que importan para contexto largo:
 - `OLLAMA_FLASH_ATTENTION=1`
 - `OLLAMA_CONTEXT_LENGTH` fijado explícitamente, porque el default es chico
 
-El modelo de embeddings es local vía Ollama, con dimensión **768** fijada en el
-esquema. Los dos candidatos, `embeddinggemma` y `nomic-embed-text`, producen 768
-dimensiones, así que la elección entre ellos no afecta la migración. Cambiar más
-adelante a un modelo de otra dimensión exige migrar el esquema y re-embeddear
-todo el histórico.
+Cambiar más adelante a un modelo de embeddings de otra dimensión exige migrar el
+esquema y re-embeddear todo el histórico, razón por la cual la dimensión se fija
+explícitamente y no se infiere.
 
 ### Caching de tokens por proveedor
 
@@ -212,11 +217,13 @@ backoff. Cuando la cola está vacía queda dormido.
 Este despachador no contradice la decisión de no usar workers: no hace trabajo
 especulativo ni toca modelos, solo entrega lo que ya existe.
 
-Riesgo conocido de doble envío: si el envío tiene éxito y el proceso muere antes
-de marcarlo, el reintento podría duplicar el mensaje. Mitigación primaria es
-fijar el ID del mensaje al enviar, si Baileys lo permite, lo que se verifica en
-implementación. Si no lo permite, se acepta un duplicado ocasional y queda
-documentado.
+El riesgo de doble envío queda resuelto: si el envío tiene éxito y el proceso
+muere antes de marcarlo, el reintento podría duplicar el mensaje, pero Baileys
+acepta `messageId` en las opciones de `sendMessage` para fijar el ID desde el
+cliente (verificado en `MinimalRelayOptions` de la versión instalada). La clave
+de idempotencia de la cola se usa como ese ID, de modo que un reintento produce
+el mismo ID y WhatsApp lo descarta como duplicado en lugar de mostrarlo dos
+veces.
 
 ## 7. Conversación de control
 
