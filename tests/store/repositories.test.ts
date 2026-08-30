@@ -228,8 +228,9 @@ test('insertMessage revierte el insert si falla la actualización de actividad',
     END;
     $$
   `
+  // `OR REPLACE` porque un run abortado antes de la limpieza dejaría el trigger vivo y haría fallar todos los runs siguientes.
   await handle.sql`
-    CREATE TRIGGER fail_atomic_message_update
+    CREATE OR REPLACE TRIGGER fail_atomic_message_update
     BEFORE UPDATE ON conversations
     FOR EACH ROW
     WHEN (NEW.external_id = 'atomic-failure-conversation')
