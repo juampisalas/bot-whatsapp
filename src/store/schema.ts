@@ -286,3 +286,35 @@ export const chatPreferences = pgTable(
     uniqueIndex('chat_preferences_alias_idx').on(sql`lower(${t.alias})`),
   ],
 )
+
+/**
+ * Cached per-day partial summaries. Reused when message count, last message
+ * timestamp, model, and prompt version still match the bucket.
+ */
+export const chunkSummaries = pgTable(
+  'chunk_summaries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    /** Calendar day in the preferences timezone, `YYYY-MM-DD`. */
+    day: text('day').notNull(),
+    model: text('model').notNull(),
+    promptVersion: integer('prompt_version').notNull(),
+    messageCount: integer('message_count').notNull(),
+    /** Max `sent_at` observed in the bucket when the summary was written. */
+    lastMessageAt: timestamp('last_message_at', { withTimezone: true }).notNull(),
+    summaryText: text('summary_text').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('chunk_summaries_conversation_day_model_prompt_idx').on(
+      t.conversationId,
+      t.day,
+      t.model,
+      t.promptVersion,
+    ),
+  ],
+)

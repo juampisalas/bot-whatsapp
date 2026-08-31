@@ -2,6 +2,7 @@ import { and, eq, sql } from 'drizzle-orm'
 import type { ProviderId } from '../../domain/types.ts'
 import type { Db } from '../client.ts'
 import { chatPreferences, conversations, preferences } from '../schema.ts'
+import { invalidateChunksForTimezoneChange } from './chunks.ts'
 
 export type GlobalPreferencesRow = typeof preferences.$inferSelect
 export type ChatPreferencesRow = typeof chatPreferences.$inferSelect
@@ -42,10 +43,21 @@ export async function loadChatPreferences(
   return rows[0] ?? null
 }
 
+/**
+ * Upserts the singleton global preferences row.
+ * When `timezone` changes, deletes all `chunk_summaries` because day buckets
+ * are delimited in that timezone.
+ */
 export async function upsertGlobalPreferences(
   db: Db,
   patch: GlobalPreferencesPatch,
 ): Promise<void> {
+  let timezoneChanged = false
+  if (patch.timezone !== undefined) {
+    const current = await loadGlobalPreferences(db)
+    timezoneChanged = (current?.timezone ?? null) !== patch.timezone
+  }
+
   await db
     .insert(preferences)
     .values({
@@ -67,6 +79,10 @@ export async function upsertGlobalPreferences(
         updatedAt: new Date(),
       },
     })
+
+  if (timezoneChanged) {
+    await invalidateChunksForTimezoneChange(db)
+  }
 }
 
 export async function upsertChatPreferences(

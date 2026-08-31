@@ -32,6 +32,7 @@ test('lists all public tables', async () => {
     'capture_policy',
     'capture_rules',
     'chat_preferences',
+    'chunk_summaries',
     'conversations',
     'messages',
     'outbound_messages',
@@ -50,7 +51,7 @@ test('embedding column has 768 dimensions', async () => {
 })
 
 test('a message is unique by provider and external id', async () => {
-  await handle.sql`TRUNCATE TABLE attachments, messages, chat_preferences, conversations`
+  await handle.sql`TRUNCATE TABLE chunk_summaries, attachments, messages, chat_preferences, conversations`
   try {
     const [conversation] = await handle.db
       .insert(conversations)
@@ -75,7 +76,7 @@ test('a message is unique by provider and external id', async () => {
     const duplicateInsert = Promise.resolve(handle.db.insert(messages).values(duplicateMessage))
     await expect(duplicateInsert).rejects.toThrow()
   } finally {
-    await handle.sql`TRUNCATE TABLE attachments, messages, chat_preferences, conversations`
+    await handle.sql`TRUNCATE TABLE chunk_summaries, attachments, messages, chat_preferences, conversations`
   }
 })
 
@@ -93,7 +94,7 @@ test('capture policy only allows the row with id 1', async () => {
 test('outbound_messages, bot_messages, and pending_clarifications accept a row', async () => {
   await handle.sql`
     TRUNCATE TABLE bot_messages, pending_clarifications, outbound_messages,
-      attachments, messages, chat_preferences, conversations
+      chunk_summaries, attachments, messages, chat_preferences, conversations
   `
   try {
     const [conversation] = await handle.db
@@ -131,7 +132,7 @@ test('outbound_messages, bot_messages, and pending_clarifications accept a row',
   } finally {
     await handle.sql`
       TRUNCATE TABLE bot_messages, pending_clarifications, outbound_messages,
-        attachments, messages, chat_preferences, conversations
+        chunk_summaries, attachments, messages, chat_preferences, conversations
     `
   }
 })
