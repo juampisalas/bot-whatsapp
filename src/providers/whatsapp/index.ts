@@ -26,6 +26,7 @@ export interface WhatsAppProviderOptions {
   authDir: string
   mediaDir: string
   log?: Logger
+  socketFactory?: () => WASocket | Promise<WASocket>
 }
 
 interface ReadyWaiter {
@@ -34,14 +35,25 @@ interface ReadyWaiter {
   timer: ReturnType<typeof setTimeout>
 }
 
+type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'loggedOut'
+  | 'closed'
+
 export class WhatsAppProvider implements MessagingProvider {
   readonly id: ProviderId = 'whatsapp'
 
   private socket: WASocket | null = null
   private handler: InboundHandler | null = null
-  private closing = false
+  private state: ConnectionState = 'idle'
+  private terminalError: Error | null = null
+  private generation = 0
+  private lifecycleTask: Promise<void> | null = null
+  private cancelReconnectDelay: (() => void) | null = null
   private reconnectDelayMs = 1_000
-  private open = false
   private readonly readyWaiters: ReadyWaiter[] = []
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
@@ -55,7 +67,121 @@ export class WhatsAppProvider implements MessagingProvider {
   }
 
   async connect(): Promise<void> {
-    this.closing = false
+    if (this.state === 'open' || this.state === 'connecting' || this.state === 'reconnecting') {
+      if (this.lifecycleTask) await this.lifecycleTask
+      return
+    }
+    if (this.lifecycleTask) {
+      await this.lifecycleTask
+      return this.connect()
+    }
+
+    // Logout is terminal until an explicit retry signals that credentials were repaired.
+    this.terminalError = null
+    this.state = 'connecting'
+    const task = this.runExplicitConnect()
+    this.lifecycleTask = task
+    try {
+      await task
+    } finally {
+      this.finishLifecycleTask(task)
+    }
+  }
+
+  private async runExplicitConnect(): Promise<void> {
+    try {
+      await this.installSocket()
+    } catch (error) {
+      if (this.state === 'connecting') this.state = 'idle'
+      throw error
+    }
+  }
+
+  private async installSocket(): Promise<boolean> {
+    const generation = ++this.generation
+    const { socket, saveCreds } = await this.createSocket()
+    if (!this.isAttemptCurrent(generation)) {
+      await this.endSocket(socket)
+      return false
+    }
+
+    const previous = this.socket
+    if (previous && previous !== socket) await this.endSocket(previous)
+    if (!this.isAttemptCurrent(generation)) {
+      await this.endSocket(socket)
+      return false
+    }
+
+    this.socket = socket
+    this.bindSocket(socket, generation, saveCreds)
+    return true
+  }
+
+  private isAttemptCurrent(generation: number): boolean {
+    return (
+      generation === this.generation &&
+      (this.state === 'connecting' || this.state === 'reconnecting')
+    )
+  }
+
+  private isCurrentSocket(socket: WASocket, generation: number): boolean {
+    return this.socket === socket && this.generation === generation
+  }
+
+  private bindSocket(
+    socket: WASocket,
+    generation: number,
+    saveCreds: () => Promise<void>,
+  ): void {
+    socket.ev.on('creds.update', () => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void saveCreds().catch((error: unknown) => {
+        this.log.error('no se pudieron guardar las credenciales de WhatsApp', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    })
+
+    socket.ev.on('connection.update', (update) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      if (update.qr) {
+        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
+        // Baileys exposes only the QR payload; linked-device setup requires rendering it.
+        qrcode.generate(update.qr, { small: true })
+      }
+      if (update.connection === 'open') {
+        this.reconnectDelayMs = 1_000
+        this.state = 'open'
+        this.settleReadyWaiters()
+        this.log.info('conexión establecida con WhatsApp')
+      }
+      if (update.connection === 'close') {
+        this.handleClose(socket, generation, update.lastDisconnect?.error)
+      }
+    })
+
+    socket.ev.on('messages.upsert', ({ messages }) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void this.dispatch(messages, socket)
+    })
+
+    socket.ev.on('messaging-history.set', ({ messages }) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void this.dispatch(messages, socket)
+    })
+  }
+
+  private async createSocket(): Promise<{
+    socket: WASocket
+    saveCreds: () => Promise<void>
+  }> {
+    if (this.options.socketFactory) {
+      return {
+        socket: await this.options.socketFactory(),
+        saveCreds: async () => {},
+      }
+    }
+
     await mkdir(this.options.authDir, { recursive: true })
     await mkdir(this.options.mediaDir, { recursive: true })
 
@@ -66,40 +192,12 @@ export class WhatsAppProvider implements MessagingProvider {
       version,
       syncFullHistory: true,
     })
-    this.socket = socket
-
-    socket.ev.on('creds.update', () => {
-      void saveCreds()
-    })
-
-    socket.ev.on('connection.update', (update) => {
-      if (update.qr) {
-        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
-        // Baileys exposes only the QR payload; linked-device setup requires rendering it.
-        qrcode.generate(update.qr, { small: true })
-      }
-      if (update.connection === 'open') {
-        this.reconnectDelayMs = 1_000
-        this.open = true
-        this.settleReadyWaiters()
-        this.log.info('conexión establecida con WhatsApp')
-      }
-      if (update.connection === 'close') {
-        void this.handleClose(update.lastDisconnect?.error)
-      }
-    })
-
-    socket.ev.on('messages.upsert', ({ messages }) => {
-      void this.dispatch(messages)
-    })
-
-    socket.ev.on('messaging-history.set', ({ messages }) => {
-      void this.dispatch(messages)
-    })
+    return { socket, saveCreds }
   }
 
   async waitUntilReady(timeoutMs = 120_000): Promise<void> {
-    if (this.open) return
+    if (this.state === 'open') return
+    if (this.terminalError) throw this.terminalError
     await new Promise<void>((resolve, reject) => {
       let waiter: ReadyWaiter
       const timer = setTimeout(() => {
@@ -122,9 +220,9 @@ export class WhatsAppProvider implements MessagingProvider {
     }
   }
 
-  private async dispatch(waMessages: readonly WAMessage[]): Promise<void> {
+  private async dispatch(waMessages: readonly WAMessage[], socket: WASocket): Promise<void> {
     const handler = this.handler
-    const selfJid = this.socket?.user?.id
+    const selfJid = socket.user?.id
     if (!handler || !selfJid) return
 
     for (const raw of waMessages) {
@@ -141,39 +239,100 @@ export class WhatsAppProvider implements MessagingProvider {
     }
   }
 
-  private async handleClose(error: unknown): Promise<void> {
-    this.open = false
-    if (this.closing) return
-
+  private handleClose(socket: WASocket, generation: number, error: unknown): void {
+    if (!this.isCurrentSocket(socket, generation)) return
+    this.socket = null
     const statusCode =
       typeof error === 'object' && error !== null && 'output' in error
         ? (error as { output?: { statusCode?: number } }).output?.statusCode
         : undefined
 
     if (statusCode === DisconnectReason.loggedOut) {
+      this.state = 'loggedOut'
+      this.generation += 1
+      this.terminalError = new Error('La sesión de WhatsApp fue cerrada desde el teléfono')
       this.log.error(
         'la sesión se cerró desde el teléfono: borrá el directorio de credenciales y volvé a vincular',
         { authDir: this.options.authDir },
       )
-      this.settleReadyWaiters(
-        new Error('La sesión de WhatsApp fue cerrada desde el teléfono'),
-      )
+      this.settleReadyWaiters(this.terminalError)
       return
     }
 
-    const delay = this.reconnectDelayMs
-    this.reconnectDelayMs = Math.min(delay * 2, 60_000)
-    this.log.warn('conexión caída, reintentando', { enMs: delay })
-    await Bun.sleep(delay)
-    if (!this.closing) await this.connect()
+    this.state = 'reconnecting'
+    this.startReconnectLoop()
+  }
+
+  private startReconnectLoop(): void {
+    if (this.lifecycleTask) return
+    const task = this.runReconnectLoop()
+    this.lifecycleTask = task
+    void task.finally(() => {
+      this.finishLifecycleTask(task)
+    })
+  }
+
+  private finishLifecycleTask(task: Promise<void>): void {
+    if (this.lifecycleTask !== task) return
+    this.lifecycleTask = null
+    if (this.state === 'reconnecting' && this.socket === null) {
+      this.startReconnectLoop()
+    }
+  }
+
+  private async runReconnectLoop(): Promise<void> {
+    while (this.state === 'reconnecting') {
+      const delay = this.reconnectDelayMs
+      this.reconnectDelayMs = Math.min(delay * 2, 60_000)
+      this.log.warn('conexión caída, reintentando', { enMs: delay })
+      await this.waitForReconnectDelay(delay)
+      if (this.state !== 'reconnecting') return
+
+      try {
+        const installed = await this.installSocket()
+        if (installed) return
+      } catch (error) {
+        if (this.state !== 'reconnecting') return
+        this.log.error('falló la preparación de la conexión de WhatsApp', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
+  private async waitForReconnectDelay(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const finish = () => {
+        if (timer) clearTimeout(timer)
+        if (this.cancelReconnectDelay === finish) this.cancelReconnectDelay = null
+        resolve()
+      }
+      this.cancelReconnectDelay = finish
+      timer = setTimeout(finish, delayMs)
+    })
+  }
+
+  private async endSocket(socket: WASocket): Promise<void> {
+    try {
+      await socket.end(undefined)
+    } catch (error) {
+      this.log.warn('falló el cierre del socket de WhatsApp', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   async disconnect(): Promise<void> {
-    this.closing = true
-    this.open = false
-    this.settleReadyWaiters(new Error('Se cerró la conexión antes de estar lista'))
-    await this.socket?.end(undefined)
+    const error = new Error('Se cerró la conexión antes de estar lista')
+    this.generation += 1
+    this.state = 'closed'
+    this.terminalError = error
+    this.cancelReconnectDelay?.()
+    this.settleReadyWaiters(error)
+    const socket = this.socket
     this.socket = null
+    if (socket) await this.endSocket(socket)
   }
 
   async send(
@@ -181,8 +340,8 @@ export class WhatsAppProvider implements MessagingProvider {
     content: OutboundContent,
     idempotencyKey: string,
   ): Promise<SentMessage> {
-    if (!this.socket) throw new Error('WhatsAppProvider sin conectar')
-    const sent = await this.socket.sendMessage(
+    const socket = this.usableSocket()
+    const sent = await socket.sendMessage(
       target.externalId,
       { text: content.text },
       { messageId: idempotencyKey },
@@ -206,13 +365,17 @@ export class WhatsAppProvider implements MessagingProvider {
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    if (!this.socket) throw new Error('WhatsAppProvider sin conectar')
-    const groups = await this.socket.groupFetchAllParticipating()
+    const groups = await this.usableSocket().groupFetchAllParticipating()
     return Object.values(groups).map((group) => ({
       externalId: group.id,
       kind: 'group',
       name: group.subject ?? null,
       participantCount: group.participants?.length ?? null,
     }))
+  }
+
+  private usableSocket(): WASocket {
+    if (this.state === 'open' && this.socket) return this.socket
+    throw this.terminalError ?? new Error('WhatsAppProvider sin conectar')
   }
 }
