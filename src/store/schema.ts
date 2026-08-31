@@ -103,6 +103,7 @@ export const messages = pgTable(
   (t) => [
     uniqueIndex('messages_provider_external_id_idx').on(t.provider, t.externalId),
     index('messages_conversation_sent_at_idx').on(t.conversationId, t.sentAt),
+    index('messages_embedding_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
   ],
 )
 

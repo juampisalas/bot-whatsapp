@@ -50,6 +50,13 @@
       "when": 1788196084635,
       "tag": "0006_curvy_rumiko_fujikawa",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788196471724,
+      "tag": "0007_fearless_banshee",
+      "breakpoints": true
     }
   ]
 }
