@@ -72,3 +72,17 @@ test('describirError nombra por el código a la causa sin mensaje', () => {
 test('describirError no rompe con algo que no es un Error', () => {
   expect(describirError('se cayó todo')).toBe('se cayó todo')
 })
+
+test('describirError corta una cadena de causas que se cierra en ciclo', () => {
+  const arriba = new Error('Failed query')
+  arriba.cause = new Error('conexión rechazada', { cause: arriba })
+
+  expect(describirError(arriba)).toBe('Failed query: conexión rechazada')
+})
+
+test('describirError corta un error que se nombra como su propia causa', () => {
+  const solo = new Error('se muerde la cola')
+  solo.cause = solo
+
+  expect(describirError(solo)).toBe('se muerde la cola')
+})

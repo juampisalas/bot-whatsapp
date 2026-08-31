@@ -14,9 +14,21 @@ export const silentLogger: Logger = { info: () => {}, warn: () => {}, error: () 
  * quien está mirando por qué no arrancó.
  */
 export function describirError(error: unknown): string {
+  return describirCadena(error, new Set())
+}
+
+/**
+ * Corta si la cadena de causas se cierra en ciclo (`a.cause = b`, `b.cause = a`): sin eso
+ * la recursión desborda la pila justo cuando se está intentando reportar un fallo, y quien
+ * llama suele estar en un camino de error donde ya no queda dónde avisar.
+ */
+function describirCadena(error: unknown, vistos: Set<unknown>): string {
   if (!(error instanceof Error)) return String(error)
 
   const codigo = 'code' in error && typeof error.code === 'string' ? error.code : null
   const propio = error.message || codigo || error.name
-  return error.cause === undefined ? propio : `${propio}: ${describirError(error.cause)}`
+  vistos.add(error)
+  return error.cause === undefined || vistos.has(error.cause)
+    ? propio
+    : `${propio}: ${describirCadena(error.cause, vistos)}`
 }

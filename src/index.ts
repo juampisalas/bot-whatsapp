@@ -24,6 +24,28 @@ try {
 const provider = createProvider(config.PROVIDER, config, log)
 
 if (comando === 'list-conversations') {
+  /**
+   * La espera del QR de acá abajo puede durar minutos y es la que más se mira: el listado se
+   * corre antes de tener credenciales. Sin manejador propio, la señal mata el proceso con el
+   * socket abierto y las credenciales a medio escribir. Acá todavía no hay base ni buffer, así
+   * que el apagado ordenado del modo captura sería de más: alcanza con soltar el proveedor.
+   */
+  let cortando: Promise<never> | null = null
+  const cortar = (senal: number): void => {
+    // Un Ctrl-C impaciente no arranca una segunda desconexión sobre la primera.
+    cortando ??= (async (): Promise<never> => {
+      try {
+        await provider.disconnect()
+      } catch (error) {
+        log.error('no se pudo cerrar la conexión', { error: describirError(error) })
+      }
+      process.exit(128 + senal)
+    })()
+  }
+
+  process.once('SIGINT', () => cortar(2))
+  process.once('SIGTERM', () => cortar(15))
+
   let codigo = 0
   try {
     await provider.connect()
@@ -33,8 +55,12 @@ if (comando === 'list-conversations') {
       console.log(`${conversacion.externalId}\t${conversacion.name ?? '(sin nombre)'}`)
     }
   } catch (error) {
-    log.error('no se pudieron listar las conversaciones', { error: describirError(error) })
-    codigo = 1
+    // Con una señal en curso el rechazo es de la desconexión que ella pidió, no un fallo de
+    // listado: anunciarlo como tal mandaría a buscar un problema que no existe.
+    if (cortando === null) {
+      log.error('no se pudieron listar las conversaciones', { error: describirError(error) })
+      codigo = 1
+    }
   }
 
   // Se desconecta afuera del try: un fallo al listar no justifica dejar el socket abierto.
@@ -43,6 +69,9 @@ if (comando === 'list-conversations') {
   } catch (error) {
     log.error('no se pudo cerrar la conexión', { error: describirError(error) })
   }
+
+  // El final lo decide la señal si llegó: `cortar` sale con su propio código y no devuelve.
+  if (cortando) await cortando
 
   // baileys deja temporizadores propios; salir explícito evita que el proceso quede colgado.
   process.exit(codigo)
@@ -90,9 +119,8 @@ const shutdown = createShutdown({
 
 /**
  * Un apagado que tiró mensajes no sale con cero: un supervisor que solo mira el código
- * de salida no tiene que poder confundirlo con uno limpio. La contra —un SIGTERM
- * contado como caída— no aplica acá: el proceso termina porque se lo pidieron y no hay
- * bucle de reinicio detrás.
+ * de salida no tiene que poder confundirlo con uno limpio. Depende de que no haya un
+ * bucle de reinicio detrás; con uno, habría que distinguir la señal de la caída.
  */
 function salir(perdidos: number): never {
   process.exit(perdidos > 0 ? 1 : 0)

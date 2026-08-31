@@ -107,10 +107,11 @@ export function createIngestPipeline(deps: IngestDeps) {
     return persistidos
   }
 
-  // `vaciar` arranca drenando el buffer, así que dos corridas en paralelo se pisan: la
-  // segunda drena la nada y responde cero mientras la primera todavía puede reencolar.
-  // El apagado se apoya en ese número para decidir si hubo pérdida, así que en vez de
-  // correr en paralelo espera al vaciado en vuelo.
+  // `vaciar` arranca drenando el buffer, así que mientras una corrida está en vuelo el
+  // buffer está vacío y `bufferSize` no dice la verdad: lo que esa corrida no logre
+  // persistir vuelve recién al reencolar. Esperar al vaciado en vuelo en vez de arrancar
+  // otro corre la lectura de `bufferSize` hasta después de ese reencolado, que es el
+  // único momento en que refleja lo que de verdad quedó sin persistir.
   let enVuelo: Promise<number> | null = null
 
   /** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */

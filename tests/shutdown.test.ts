@@ -5,12 +5,18 @@ import { createShutdown } from '../src/shutdown.ts'
 interface OpcionesEntorno {
   /** Cuántos mensajes hay encolados cuando llega la señal. */
   pendientes?: number
-  /** Cuántos de esos logra persistir el vaciado; por defecto, todos. */
-  persistidos?: number
+  /** Cuántos de esos rechaza la base en todo intento; por defecto, ninguno. */
+  irrecuperables?: number
+  /**
+   * Cuántos entran al buffer mientras corre el primer vaciado. Emula el coalescing de
+   * `flushBuffer`: el número que recibe el apagado viene de un vaciado que ya había
+   * drenado, así que estos quedan encolados sin haber tenido su intento.
+   */
+  tardios?: number
   fallaVaciado?: Error
   fallaDesconexion?: Error
   fallaCierreBase?: Error
-  /** Rompe el aviso de vaciado, el único paso que corre con el buffer ya persistido. */
+  /** Rompe el aviso de vaciado, que corre cuando la pérdida ya está medida. */
   fallaAviso?: Error
 }
 
@@ -36,14 +42,17 @@ function crearEntorno(opciones: OpcionesEntorno = {}) {
   // haber persistido, así que los `perdidos` esperados solo salen si el apagado los mide
   // después del último intento y no antes.
   let pendientes = opciones.pendientes ?? 0
+  let tardios = opciones.tardios ?? 0
 
   const shutdown = createShutdown({
     pipeline: {
       flushBuffer: async () => {
         orden.push('vaciar')
         if (opciones.fallaVaciado) throw opciones.fallaVaciado
-        const persistidos = Math.min(opciones.persistidos ?? pendientes, pendientes)
+        const persistidos = Math.max(0, pendientes - (opciones.irrecuperables ?? 0))
         pendientes -= persistidos
+        pendientes += tardios
+        tardios = 0
         return persistidos
       },
       get bufferSize() {
@@ -79,13 +88,31 @@ test('vacía el buffer antes de desconectar y cerrar la base', async () => {
 })
 
 test('avisa cuántos mensajes se pierden si el buffer no se vacía del todo', async () => {
-  const entorno = crearEntorno({ pendientes: 5, persistidos: 1 })
+  const entorno = crearEntorno({ pendientes: 5, irrecuperables: 4 })
 
   expect(await entorno.shutdown.apagar()).toBe(4)
 
   expect(entorno.errores).toHaveLength(1)
   expect(entorno.errores[0]?.meta?.perdidos).toBe(4)
   expect(entorno.orden).toContain('cerrarBase')
+})
+
+test('reintenta el vaciado por lo que entró al buffer durante el anterior', async () => {
+  const entorno = crearEntorno({ pendientes: 2, tardios: 1 })
+
+  expect(await entorno.shutdown.apagar()).toBe(0)
+
+  expect(entorno.orden).toEqual([
+    'cortarReintento',
+    'vaciar',
+    'vaciar',
+    'desconectar',
+    'cerrarBase',
+  ])
+  expect(
+    entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos,
+  ).toBe(3)
+  expect(entorno.errores).toHaveLength(0)
 })
 
 test('avisa cuántos mensajes se pierden si el vaciado falla', async () => {
@@ -142,11 +169,35 @@ test('termina el apagado aunque falle el cierre de la base', async () => {
 })
 
 test('un aviso roto no se reporta como pérdida ni interrumpe el apagado', async () => {
-  const entorno = crearEntorno({ pendientes: 2, fallaAviso: new Error('stdout cerrado') })
+  const entorno = crearEntorno({
+    pendientes: 5,
+    irrecuperables: 4,
+    fallaAviso: new Error('stdout cerrado'),
+  })
 
-  expect(await entorno.shutdown.apagar()).toBe(0)
+  // El aviso rompe entre medir la pérdida y devolverla: si el apagado la soltara ahí, saldría
+  // con cero después de tirar cuatro mensajes.
+  expect(await entorno.shutdown.apagar()).toBe(4)
 
   expect(entorno.errores.some((linea) => linea.message.includes('falló el vaciado'))).toBe(false)
   expect(entorno.errores.some((linea) => linea.meta?.error === 'stdout cerrado')).toBe(true)
-  expect(entorno.orden).toEqual(['cortarReintento', 'vaciar', 'desconectar', 'cerrarBase'])
+  expect(entorno.orden).toEqual([
+    'cortarReintento',
+    'vaciar',
+    'vaciar',
+    'desconectar',
+    'cerrarBase',
+  ])
+})
+
+test('una causa circular no borra la cuenta de mensajes perdidos', async () => {
+  // `describirError` recorre la cadena de causas para armar la línea de log: si desborda la
+  // pila, el fallo se lleva puesto el número que decide el código de salida.
+  const arriba = new Error('base caída')
+  arriba.cause = new Error('socket roto', { cause: arriba })
+  const entorno = crearEntorno({ pendientes: 4, fallaVaciado: arriba })
+
+  expect(await entorno.shutdown.apagar()).toBe(4)
+
+  expect(entorno.orden).toContain('cerrarBase')
 })
