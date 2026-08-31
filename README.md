@@ -3,12 +3,13 @@
 Bot que resume conversaciones de WhatsApp a pedido. Se vincula a tu cuenta como dispositivo
 enlazado, guarda los mensajes en Postgres y responde resúmenes en un grupo de control.
 
-Estado: la captura está escrita entera y cubierta por tests, pero **todavía nadie vinculó un
-teléfono**. Lo que sí está comprobado corriendo: la suite completa, el arranque con el
-proveedor falso contra Postgres, el QR apareciendo en la terminal y el Ctrl-C durante esa
-espera. Lo que falta comprobar empieza justo después de escanear ese QR: que los mensajes
-reales lleguen a la base y que los adjuntos reales bajen. Los resúmenes y el bucle de control
-ni siquiera están escritos; ver [Qué falta](#qué-falta).
+Estado: la captura y el bucle de control están escritos y cubiertos por tests, pero
+**todavía nadie vinculó un teléfono**. Lo que sí está comprobado corriendo: la suite
+completa, el arranque con el proveedor falso contra Postgres, el QR apareciendo en la
+terminal y el Ctrl-C durante esa espera. Lo que falta comprobar empieza justo después de
+escanear ese QR: que los mensajes reales lleguen a la base, que los adjuntos reales bajen y
+que el bot responda de verdad en el grupo de control. Los resúmenes todavía no están; ver
+[Qué falta](#qué-falta).
 
 ## Requisitos
 
@@ -44,17 +45,24 @@ La sesión queda guardada en `WHATSAPP_AUTH_DIR`, así que el QR solo se pide un
 cerrás el dispositivo vinculado desde el teléfono, hay que borrar ese directorio y volver a
 vincular.
 
-Para capturar mensajes:
+Para capturar mensajes y responder en el grupo de control (si `CONTROL_CONVERSATION_ID`
+está definido):
 
 ```bash
 bun start
 ```
 
+Sin `CONTROL_CONVERSATION_ID` el bot solo captura: no encola ni responde nada. Con el
+identificador configurado, los mensajes del grupo de control pasan por el bucle de control.
+Por ahora el stub responde a `help`; los resúmenes vienen después. Las respuestas del bot
+llevan el prefijo `BOT_PREFIX` (`✦ `): lo que ya empieza con ese prefijo se ignora, para no
+reaccionar a los propios mensajes.
+
 ## Comandos
 
 | Comando | Qué hace |
 |---|---|
-| `bun start` | Captura mensajes y los persiste |
+| `bun start` | Captura mensajes y, si `CONTROL_CONVERSATION_ID` está definido, responde en el grupo de control |
 | `bun run src/index.ts list-conversations` | Lista los grupos en los que participás, con su identificador |
 | `bun run dev` | Igual que `start`, recargando al editar |
 | `bun test` | Corre la suite (necesita Postgres arriba) |
@@ -72,8 +80,14 @@ completa.
 Lo que más se toca:
 
 - `PROVIDER`: `whatsapp` o `fake`. El falso sirve para probar sin teléfono.
-- `CONTROL_CONVERSATION_ID`: el grupo donde pedir los resúmenes.
+- `CONTROL_CONVERSATION_ID`: el grupo donde el bot escucha y responde. Sin valor, no hay
+  respuesta.
 - `CAPTURE_BUFFER_MAX`: cuántos mensajes retener en memoria si Postgres no responde.
+- `SHUTDOWN_TIMEOUT_MS`: tope duro (ms) de toda la secuencia de apagado. Por defecto
+  `15000`.
+
+El prefijo de las respuestas del bot es la constante `BOT_PREFIX` (`✦ `) en el código, no
+una variable de entorno.
 
 ### Política de captura
 
@@ -178,7 +192,7 @@ en pie sin capturar nada. Una caída de conexión común, en cambio, reconecta c
 
 Además de la prueba de vinculación con un teléfono, en este orden:
 
-1. [Cola de salida y bucle de control](docs/superpowers/plans/2026-08-30-cola-y-control.md)
+1. ~~Cola de salida y bucle de control~~ — hecho (stub con `help`; resúmenes después)
 2. [Resúmenes](docs/superpowers/plans/2026-08-30-resumenes.md)
 3. [Media y búsqueda semántica](docs/superpowers/plans/2026-08-30-media-y-busqueda.md)
 
