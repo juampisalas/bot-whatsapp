@@ -3,19 +3,18 @@
 Bot que resume conversaciones de WhatsApp a pedido. Se vincula a tu cuenta como dispositivo
 enlazado, guarda los mensajes en Postgres y responde resúmenes en un grupo de control.
 
-Estado: la captura y el bucle de control están escritos y cubiertos por tests, pero
-**todavía nadie vinculó un teléfono**. Lo que sí está comprobado corriendo: la suite
-completa, el arranque con el proveedor falso contra Postgres, el QR apareciendo en la
-terminal y el Ctrl-C durante esa espera. Lo que falta comprobar empieza justo después de
+Estado: la captura, el bucle de control y los resúmenes están escritos y cubiertos por tests,
+pero **todavía nadie vinculó un teléfono**. Lo que sí está comprobado corriendo: la suite
+completa, el arranque contra Postgres (incluido el LLM real con Ollama), el QR apareciendo en
+la terminal y el Ctrl-C durante esa espera. Lo que falta comprobar empieza justo después de
 escanear ese QR: que los mensajes reales lleguen a la base, que los adjuntos reales bajen y
-que el bot responda de verdad en el grupo de control. Los resúmenes todavía no están; ver
-[Qué falta](#qué-falta).
+que el bot responda de verdad en el grupo de control.
 
 ## Requisitos
 
 - [Bun](https://bun.com) 1.4 o mayor
 - Docker, para el Postgres con pgvector
-- [Ollama](https://ollama.com), para los modelos locales (todavía no se usa)
+- [Ollama](https://ollama.com) en marcha (por defecto; ver `LLM_PROVIDER`)
 
 ## Puesta en marcha
 
@@ -28,6 +27,9 @@ bun run db:migrate
 
 El `db:up` levanta Postgres 18 con la extensión `vector` en el puerto **5433**, para no
 pisar una instalación local en el 5432. La primera vez también crea la base de tests.
+
+Con el proveedor por defecto (`ollama`), Ollama tiene que estar arriba y el modelo de
+`LLM_MODEL` descargado (`ollama pull …`) antes de pedir un resumen.
 
 Para conseguir el identificador del grupo de control:
 
@@ -54,9 +56,9 @@ bun start
 
 Sin `CONTROL_CONVERSATION_ID` el bot solo captura: no encola ni responde nada. Con el
 identificador configurado, los mensajes del grupo de control pasan por el bucle de control.
-Por ahora el stub responde a `help`; los resúmenes vienen después. Las respuestas del bot
-llevan el prefijo `BOT_PREFIX` (`✦ `): lo que ya empieza con ese prefijo se ignora, para no
-reaccionar a los propios mensajes.
+Ahí pedís resúmenes (y `help`); las respuestas del bot llevan el prefijo `BOT_PREFIX`
+(`✦ `): lo que ya empieza con ese prefijo se ignora, para no reaccionar a los propios
+mensajes.
 
 ## Comandos
 
@@ -81,7 +83,12 @@ Lo que más se toca:
 
 - `PROVIDER`: `whatsapp` o `fake`. El falso sirve para probar sin teléfono.
 - `CONTROL_CONVERSATION_ID`: el grupo donde el bot escucha y responde. Sin valor, no hay
-  respuesta.
+  respuesta. Los pedidos de resumen salen de ese grupo.
+- `LLM_PROVIDER`: `ollama` (default), `openai`, `anthropic` o `deepseek`.
+- `LLM_MODEL`: modelo a usar (default `qwen3.6:35b-a3b` con Ollama).
+- `LLM_BASE_URL`: base de Ollama u otro endpoint compatible (default
+  `http://127.0.0.1:11434`).
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY`: solo si usás ese provider.
 - `CAPTURE_BUFFER_MAX`: cuántos mensajes retener en memoria si Postgres no responde.
 - `SHUTDOWN_TIMEOUT_MS`: tope duro (ms) de toda la secuencia de apagado. Por defecto
   `15000`.
@@ -148,6 +155,9 @@ src/
   providers/   Adaptadores de mensajería: whatsapp (Baileys), fake
   store/       Esquema Drizzle, migraciones y repositorios
   capture/     Política de captura, buffer, pipeline de ingesta, descarga de adjuntos
+  control/     Bucle de control, clasificación y guarda
+  outbox/      Despacho de respuestas al canal
+  agent/       Interpretación, resúmenes y adaptadores LLM
   cli.ts       Parseo del subcomando
   logger.ts    Logger de consola con filtrado por nivel
   shutdown.ts  Apagado ordenado
@@ -155,11 +165,11 @@ src/
 ```
 
 La regla que sostiene el diseño: **nada en `capture/`, `store/` o `domain/` importa
-`baileys`**. Los mensajes de WhatsApp se traducen a tipos neutros en
-`providers/whatsapp/normalize.ts`, y todo lo de aguas abajo trabaja con esos tipos. Por eso
-agregar Telegram o Slack más adelante es escribir un adaptador, no tocar la captura.
-`tests/arquitectura.test.ts` verifica la regla en cada corrida, porque un import de más pasa
-el typecheck sin que nadie se entere.
+`baileys`**, y **`capture/` tampoco importa `ai`**. Los mensajes de WhatsApp se traducen a
+tipos neutros en `providers/whatsapp/normalize.ts`, y todo lo de aguas abajo trabaja con esos
+tipos. El SDK de AI vive en el agente. Por eso agregar Telegram o Slack más adelante es
+escribir un adaptador, no tocar la captura. `tests/arquitectura.test.ts` verifica ambas
+reglas en cada corrida, porque un import de más pasa el typecheck sin que nadie se entere.
 
 Cuatro comportamientos que no se ven en la estructura y conviene saber:
 
@@ -192,8 +202,8 @@ en pie sin capturar nada. Una caída de conexión común, en cambio, reconecta c
 
 Además de la prueba de vinculación con un teléfono, en este orden:
 
-1. ~~Cola de salida y bucle de control~~ — hecho (stub con `help`; resúmenes después)
-2. [Resúmenes](docs/superpowers/plans/2026-08-30-resumenes.md)
+1. ~~Cola de salida y bucle de control~~ — hecho
+2. ~~[Resúmenes](docs/superpowers/plans/2026-08-30-resumenes.md)~~ — hecho
 3. [Media y búsqueda semántica](docs/superpowers/plans/2026-08-30-media-y-busqueda.md)
 
 ## Diseño

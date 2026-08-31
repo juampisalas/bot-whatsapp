@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
+import { FakeLlm } from '../../src/agent/llm/fake.ts'
 import { createIngestPipeline } from '../../src/capture/ingest.ts'
 import { BOT_PREFIX } from '../../src/control/classify.ts'
-import { createControlLoop } from '../../src/control/loop.ts'
+import { createControlLoop, HELP_REPLY } from '../../src/control/loop.ts'
 import { silentLogger } from '../../src/domain/logger.ts'
 import { createDispatcher } from '../../src/outbox/dispatcher.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
@@ -29,7 +30,19 @@ afterAll(async () => {
   await handle.close()
 })
 
-async function assemble() {
+function helpOutput() {
+  return {
+    intent: 'help' as const,
+    conversationQuery: null,
+    range: null,
+    lastNDays: null,
+    isoFrom: null,
+    isoTo: null,
+    focus: null,
+  }
+}
+
+async function assemble(llm: FakeLlm = new FakeLlm()) {
   const provider = new FakeProvider()
   await provider.connect()
   const pipeline = createIngestPipeline({
@@ -43,6 +56,7 @@ async function assemble() {
     db: handle.db,
     config: controlConfig,
     log: silentLogger,
+    llm,
   })
   const dispatcher = createDispatcher({
     db: handle.db,
@@ -56,7 +70,7 @@ async function assemble() {
     await control.handle(message)
   })
 
-  return { provider, dispatcher }
+  return { provider, dispatcher, llm }
 }
 
 function controlRequest(overrides: Parameters<typeof mensaje>[0] = {}) {
@@ -69,7 +83,9 @@ function controlRequest(overrides: Parameters<typeof mensaje>[0] = {}) {
 }
 
 test('control request help produces one sent reply with BOT_PREFIX to ctrl', async () => {
-  const { provider, dispatcher } = await assemble()
+  const llm = new FakeLlm()
+  llm.enqueue({ text: '', output: helpOutput() })
+  const { provider, dispatcher } = await assemble(llm)
 
   await provider.inject(controlRequest())
   const sent = await dispatcher.tick(new Date())
@@ -77,11 +93,14 @@ test('control request help produces one sent reply with BOT_PREFIX to ctrl', asy
   expect(sent).toBe(1)
   expect(provider.sent).toHaveLength(1)
   expect(provider.sent[0]?.target.externalId).toBe(CONTROL_ID)
+  expect(provider.sent[0]?.content.text).toBe(HELP_REPLY)
   expect(provider.sent[0]?.content.text.startsWith(BOT_PREFIX)).toBe(true)
 })
 
 test('failNextSend leaves pending then later tick after due delivers', async () => {
-  const { provider, dispatcher } = await assemble()
+  const llm = new FakeLlm()
+  llm.enqueue({ text: '', output: helpOutput() })
+  const { provider, dispatcher } = await assemble(llm)
   provider.failNextSend(new Error('socket down'))
 
   await provider.inject(controlRequest({ externalId: 'm-retry' }))
@@ -99,7 +118,9 @@ test('failNextSend leaves pending then later tick after due delivers', async () 
 })
 
 test('re-injecting bot reply with same externalId does not enqueue a second outbound', async () => {
-  const { provider, dispatcher } = await assemble()
+  const llm = new FakeLlm()
+  llm.enqueue({ text: '', output: helpOutput() })
+  const { provider, dispatcher } = await assemble(llm)
 
   await provider.inject(controlRequest({ externalId: 'm-echo' }))
   expect(await dispatcher.tick(new Date())).toBe(1)

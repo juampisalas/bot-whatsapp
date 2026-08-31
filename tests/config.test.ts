@@ -44,3 +44,14 @@ test('coerces SHUTDOWN_TIMEOUT_MS to a number', () => {
 test('rechaza el nivel de log debug', () => {
   expect(() => loadConfig({ ...base, LOG_LEVEL: 'debug' })).toThrow(/LOG_LEVEL/)
 })
+
+test('LLM defaults to ollama / qwen3.6:35b-a3b', () => {
+  const config = loadConfig(base)
+  expect(config.LLM_PROVIDER).toBe('ollama')
+  expect(config.LLM_MODEL).toBe('qwen3.6:35b-a3b')
+  expect(config.LLM_BASE_URL).toBe('http://127.0.0.1:11434')
+})
+
+test('rejects an unknown LLM_PROVIDER', () => {
+  expect(() => loadConfig({ ...base, LLM_PROVIDER: 'gemini' })).toThrow(/LLM_PROVIDER/)
+})

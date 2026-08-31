@@ -1,17 +1,25 @@
+import { interpret } from '../agent/interpret.ts'
+import type { Llm } from '../agent/llm/port.ts'
+import { getResolvedPreferences } from '../agent/preferences.ts'
+import { summarize } from '../agent/summarize/index.ts'
 import type { Config } from '../config/index.ts'
 import { describeError, type Logger } from '../domain/logger.ts'
 import type { InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
 import { isBotMessage } from '../store/repositories/bot-messages.ts'
 import { enqueueOutbound } from '../store/repositories/outbox.ts'
-import { classifyControlMessage } from './classify.ts'
+import { BOT_PREFIX, classifyControlMessage } from './classify.ts'
 import { assertControlTarget } from './guard.ts'
-import { replyFor } from './stub.ts'
+
+export const HELP_REPLY =
+  `${BOT_PREFIX}Ask me to summarize a chat by name or alias (e.g. "summarize la facu today"). ` +
+  'I can use today, yesterday, this week, or a custom range.'
 
 export function createControlLoop(deps: {
   db: Db
   config: Pick<Config, 'CONTROL_PROVIDER' | 'CONTROL_CONVERSATION_ID'>
   log: Logger
+  llm: Llm
 }) {
   async function handle(message: InboundMessage): Promise<void> {
     const conversationId = deps.config.CONTROL_CONVERSATION_ID
@@ -29,9 +37,20 @@ export function createControlLoop(deps: {
         return
       }
 
-      const text = replyFor(message.text ?? '')
       const target = { provider: message.provider, externalId: conversationId }
       assertControlTarget(deps.config, target)
+
+      let text: string
+      try {
+        text = await buildReply(deps, message, conversationId)
+      } catch (error) {
+        deps.log.error('control could not complete request', {
+          externalId: message.externalId,
+          error: describeError(error),
+        })
+        text = `${BOT_PREFIX}Could not complete the request: ${describeError(error)}`
+      }
+
       await enqueueOutbound(deps.db, {
         provider: target.provider,
         conversationExternalId: target.externalId,
@@ -47,4 +66,46 @@ export function createControlLoop(deps: {
   }
 
   return { handle }
+}
+
+async function buildReply(
+  deps: {
+    db: Db
+    llm: Llm
+    config: Pick<Config, 'CONTROL_PROVIDER' | 'CONTROL_CONVERSATION_ID'>
+  },
+  message: InboundMessage,
+  controlExternalId: string,
+): Promise<string> {
+  const globalPrefs = await getResolvedPreferences(deps.db, null)
+  const result = await interpret({
+    db: deps.db,
+    llm: deps.llm,
+    provider: message.provider,
+    controlExternalId,
+    text: message.text ?? '',
+    now: message.sentAt,
+    timezone: globalPrefs.timezone,
+  })
+
+  switch (result.kind) {
+    case 'help':
+      return HELP_REPLY
+    case 'ask':
+      return withBotPrefix(result.question)
+    case 'request': {
+      const preferences = await getResolvedPreferences(deps.db, result.request.conversationId)
+      const summary = await summarize({
+        db: deps.db,
+        llm: deps.llm,
+        request: result.request,
+        preferences,
+      })
+      return withBotPrefix(summary)
+    }
+  }
+}
+
+function withBotPrefix(text: string): string {
+  return text.startsWith(BOT_PREFIX) ? text : `${BOT_PREFIX}${text}`
 }

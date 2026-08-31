@@ -29,6 +29,20 @@
       "when": 1788193170027,
       "tag": "0003_faithful_junta",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788194580534,
+      "tag": "0004_lame_microchip",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788195329327,
+      "tag": "0005_orange_thunderbolt_ross",
+      "breakpoints": true
     }
   ]
 }

@@ -1,12 +1,20 @@
-import type { Db } from '../client.ts'
-import { conversations, participants } from '../schema.ts'
+import { and, count, desc, eq, ilike } from 'drizzle-orm'
 import type { ConversationKind, ProviderId } from '../../domain/types.ts'
+import type { Db } from '../client.ts'
+import { conversations, messages, participants } from '../schema.ts'
+
+export type ConversationHit = {
+  id: string
+  name: string | null
+  lastMessageAt: Date | null
+  messageCount: number
+}
 
 /**
- * El `set` del upsert se arma solo con los valores presentes, en lugar de
- * resolver la ausencia con `COALESCE` en SQL. Un nombre nulo significa "el
- * canal no lo informó esta vez", y en ese caso no se toca el que ya
- * teníamos. `updatedAt` garantiza que el `set` nunca quede vacío.
+ * Builds the upsert `set` from present values only, instead of resolving
+ * absence with SQL `COALESCE`. A null name means "the channel did not
+ * report it this time", so the existing name is left alone. `updatedAt`
+ * ensures the `set` is never empty.
  */
 export async function upsertConversation(
   db: Db,
@@ -31,7 +39,7 @@ export async function upsertConversation(
     .returning({ id: conversations.id })
 
   const id = rows[0]?.id
-  if (!id) throw new Error('upsertConversation no devolvió id')
+  if (!id) throw new Error('upsertConversation did not return an id')
   return id
 }
 
@@ -56,6 +64,37 @@ export async function upsertParticipant(
     .returning({ id: participants.id })
 
   const id = rows[0]?.id
-  if (!id) throw new Error('upsertParticipant no devolvió id')
+  if (!id) throw new Error('upsertParticipant did not return an id')
   return id
+}
+
+/**
+ * Case-insensitive substring match on conversation name for a provider.
+ * Ordered by recent activity; capped at 5 hits.
+ */
+export async function searchConversationsByName(
+  db: Db,
+  provider: ProviderId,
+  query: string,
+): Promise<ConversationHit[]> {
+  const rows = await db
+    .select({
+      id: conversations.id,
+      name: conversations.name,
+      lastMessageAt: conversations.lastMessageAt,
+      messageCount: count(messages.id),
+    })
+    .from(conversations)
+    .leftJoin(messages, eq(messages.conversationId, conversations.id))
+    .where(and(eq(conversations.provider, provider), ilike(conversations.name, `%${query}%`)))
+    .groupBy(conversations.id)
+    .orderBy(desc(conversations.lastMessageAt))
+    .limit(5)
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    lastMessageAt: row.lastMessageAt,
+    messageCount: Number(row.messageCount),
+  }))
 }
