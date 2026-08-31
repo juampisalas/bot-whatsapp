@@ -67,7 +67,7 @@
 - Consumes: nada
 - Produces: `loadConfig(env?: Record<string, string | undefined>): Config` y el tipo `Config` con los campos `DATABASE_URL`, `PROVIDER`, `WHATSAPP_AUTH_DIR`, `MEDIA_DIR`, `CONTROL_PROVIDER`, `CONTROL_CONVERSATION_ID`, `CAPTURE_BUFFER_MAX`, `TIMEZONE`, `LOG_LEVEL`.
 
-- [ ] **Step 1: Inicializar el proyecto e instalar dependencias**
+- [x] **Step 1: Inicializar el proyecto e instalar dependencias**
 
 ```bash
 cd /Users/juansalas/Desktop/bot-whatsapp
@@ -76,7 +76,7 @@ bun add baileys@7.0.0-rc14 drizzle-orm postgres zod qrcode-terminal
 bun add -d drizzle-kit @types/bun @types/qrcode-terminal
 ```
 
-- [ ] **Step 2: Escribir `tsconfig.json`**
+- [x] **Step 2: Escribir `tsconfig.json`**
 
 ```json
 {
@@ -101,7 +101,7 @@ bun add -d drizzle-kit @types/bun @types/qrcode-terminal
 }
 ```
 
-- [ ] **Step 3: Escribir `.gitignore`**
+- [x] **Step 3: Escribir `.gitignore`**
 
 ```gitignore
 node_modules/
@@ -115,7 +115,7 @@ dist/
 .superpowers/
 ```
 
-- [ ] **Step 4: Escribir `.env.example`**
+- [x] **Step 4: Escribir `.env.example`**
 
 ```bash
 # Conexión a Postgres. El puerto 5433 lo publica docker-compose.
@@ -129,19 +129,28 @@ PROVIDER=whatsapp
 WHATSAPP_AUTH_DIR=./data/wa-auth
 MEDIA_DIR=./data/media
 
-# Conversación de control. Si CONTROL_CONVERSATION_ID está vacío,
-# el bot lista las conversaciones disponibles al arrancar.
+# Conversación de control. Para conseguir el identificador:
+# bun run src/index.ts list-conversations
 CONTROL_PROVIDER=whatsapp
 CONTROL_CONVERSATION_ID=
 
 # Máximo de mensajes retenidos en memoria si Postgres no responde
 CAPTURE_BUFFER_MAX=1000
 
+# El alcance de la captura no se configura acá: vive en las tablas capture_policy y
+# capture_rules, y hoy solo se edita con SQL. Sin fila, se captura todo. Ver el README.
+
 TIMEZONE=America/Argentina/Buenos_Aires
 LOG_LEVEL=info
 ```
 
-- [ ] **Step 5: Escribir el test que falla**
+Dos comentarios de este archivo se corrigieron después de escribirlo:
+
+**El listado nunca fue automático.** El comentario original decía que con `CONTROL_CONVERSATION_ID` vacío el bot listaba las conversaciones al arrancar. Eso no se implementó nunca y no era buena idea: arrancar significaría algo distinto según el valor de una variable. La Tarea 12 lo resolvió con un subcomando explícito, `list-conversations`, y el comentario pasó a apuntar ahí.
+
+**La política de captura no entra por entorno.** Se lee de `capture_policy` y `capture_rules`, y hoy no hay comando ni migración que las escriba. Sin la nota, quien abra este archivo buscando un `CAPTURE_MODE` no encuentra nada y concluye que la política no existe.
+
+- [x] **Step 5: Escribir el test que falla**
 
 ```ts
 // tests/config.test.ts
@@ -171,12 +180,12 @@ test('rechaza un proveedor desconocido', () => {
 })
 ```
 
-- [ ] **Step 6: Correr el test y verificar que falla**
+- [x] **Step 6: Correr el test y verificar que falla**
 
 Run: `bun test tests/config.test.ts`
 Expected: FAIL, no resuelve el módulo `../src/config/index.ts`.
 
-- [ ] **Step 7: Implementar la configuración**
+- [x] **Step 7: Implementar la configuración**
 
 ```ts
 // src/config/index.ts
@@ -209,12 +218,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 }
 ```
 
-- [ ] **Step 8: Correr el test y verificar que pasa**
+- [x] **Step 8: Correr el test y verificar que pasa**
 
 Run: `bun test tests/config.test.ts`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 9: Agregar scripts a `package.json`**
+- [x] **Step 9: Agregar scripts a `package.json`**
 
 Dentro de `package.json`, agregar la clave `scripts`:
 
@@ -233,7 +242,7 @@ Dentro de `package.json`, agregar la clave `scripts`:
 }
 ```
 
-- [ ] **Step 10: Verificar tipos y commitear**
+- [x] **Step 10: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -254,7 +263,7 @@ git commit -m "feat: andamiaje del proyecto y configuración validada por entorn
 - Consumes: `loadConfig` de Task 1
 - Produces: `createDb(connectionString: string)` que devuelve `{ db, sql, close }`, donde `db` es la instancia de Drizzle sobre `postgres.js`, `sql` es el cliente crudo de `postgres` para consultas de test, y `close` cierra el pool. Produce además el tipo `Db`, que es el tipo de esa instancia de Drizzle y el que reciben todos los repositorios.
 
-- [ ] **Step 1: Escribir `docker/init-db.sql`**
+- [x] **Step 1: Escribir `docker/init-db.sql`**
 
 Este script corre una sola vez, cuando el volumen de datos se crea vacío. Crea la base de tests y habilita la extensión en las dos bases, porque `CREATE EXTENSION` es por base y la imagen no lo hace sola.
 
@@ -268,7 +277,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-- [ ] **Step 2: Escribir `docker-compose.yml`**
+- [x] **Step 2: Escribir `docker-compose.yml`**
 
 ```yaml
 services:
@@ -298,7 +307,7 @@ volumes:
   pgdata:
 ```
 
-- [ ] **Step 3: Levantar la base y verificar la extensión**
+- [x] **Step 3: Levantar la base y verificar la extensión**
 
 ```bash
 bun run db:up
@@ -307,7 +316,7 @@ docker exec botwhatsapp-postgres psql -U bot -d botwhatsapp_test -c "SELECT extv
 
 Expected: una fila con el número de versión de pgvector. Si sale vacío, el volumen ya existía de antes y el script de init no corrió: correr `docker compose down -v` y repetir.
 
-- [ ] **Step 4: Escribir `drizzle.config.ts`**
+- [x] **Step 4: Escribir `drizzle.config.ts`**
 
 ```ts
 import { defineConfig } from 'drizzle-kit'
@@ -322,7 +331,7 @@ export default defineConfig({
 })
 ```
 
-- [ ] **Step 5: Escribir el test que falla**
+- [x] **Step 5: Escribir el test que falla**
 
 ```ts
 // tests/store/client.test.ts
@@ -347,12 +356,12 @@ test('la extensión vector está habilitada', async () => {
 })
 ```
 
-- [ ] **Step 6: Correr el test y verificar que falla**
+- [x] **Step 6: Correr el test y verificar que falla**
 
 Run: `bun test tests/store/client.test.ts`
 Expected: FAIL, no resuelve `../../src/store/client.ts`.
 
-- [ ] **Step 7: Implementar el cliente**
+- [x] **Step 7: Implementar el cliente**
 
 ```ts
 // src/store/client.ts
@@ -383,7 +392,7 @@ export function createDb(connectionString: string) {
 export type Db = ReturnType<typeof createDb>['db']
 ```
 
-- [ ] **Step 8: Crear un `schema.ts` vacío provisorio**
+- [x] **Step 8: Crear un `schema.ts` vacío provisorio**
 
 `client.ts` importa el esquema, que se define en Task 3. Para que este test corra, crear el archivo vacío:
 
@@ -392,12 +401,12 @@ export type Db = ReturnType<typeof createDb>['db']
 export {}
 ```
 
-- [ ] **Step 9: Correr el test y verificar que pasa**
+- [x] **Step 9: Correr el test y verificar que pasa**
 
 Run: `bun test tests/store/client.test.ts`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 10: Commitear**
+- [x] **Step 10: Commitear**
 
 ```bash
 git add docker-compose.yml docker/init-db.sql drizzle.config.ts src/store tests/store
@@ -423,7 +432,7 @@ Las columnas de valores acotados usan `text().$type<Union>()` con los tipos de u
 
 Solo se crean las tablas que este plan necesita. Las de resúmenes, preferencias, cola de salida, derivaciones de adjuntos, aclaraciones pendientes y estado de sincronización las agregan los planes siguientes con sus propias migraciones. La columna `embedding` sí se incluye ahora, porque fija la dimensión y valida que la extensión funcione, pero su índice HNSW lo crea el plan de búsqueda semántica cuando haga falta.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/store/schema.test.ts
@@ -500,12 +509,12 @@ test('la base rechaza una segunda política de captura', async () => {
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/store/schema.test.ts`
 Expected: FAIL, no resuelve `../../src/store/migrate.ts`.
 
-- [ ] **Step 3: Escribir el esquema**
+- [x] **Step 3: Escribir el esquema**
 
 ```ts
 // src/store/schema.ts
@@ -675,7 +684,7 @@ export const captureRules = pgTable(
 )
 ```
 
-- [ ] **Step 4: Generar la migración**
+- [x] **Step 4: Generar la migración**
 
 ```bash
 bun run db:generate
@@ -683,7 +692,7 @@ bun run db:generate
 
 Expected: se crea `drizzle/0000_*.sql` junto a `drizzle/meta/`.
 
-- [ ] **Step 5: Agregar la extensión al principio de la migración generada**
+- [x] **Step 5: Agregar la extensión al principio de la migración generada**
 
 Abrir el archivo `drizzle/0000_*.sql` e insertar como primera línea:
 
@@ -693,7 +702,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 Esto hace que la migración funcione contra cualquier base, no solo contra las que creó `init-db.sql`.
 
-- [ ] **Step 6: Escribir el corredor de migraciones**
+- [x] **Step 6: Escribir el corredor de migraciones**
 
 ```ts
 // src/store/migrate.ts
@@ -717,12 +726,12 @@ if (import.meta.main) {
 }
 ```
 
-- [ ] **Step 7: Correr el test y verificar que pasa**
+- [x] **Step 7: Correr el test y verificar que pasa**
 
 Run: `bun test tests/store/schema.test.ts`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 8: Verificar tipos y commitear**
+- [x] **Step 8: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -749,7 +758,7 @@ El puerto incluye `waitUntilReady(timeoutMs?: number)`, separado de `connect`, p
 
 El adaptador falso es lo que hace posible los tests end-to-end de los planes siguientes, así que se construye junto al puerto para demostrar que el puerto es implementable.
 
-- [ ] **Step 1: Escribir los tipos de dominio**
+- [x] **Step 1: Escribir los tipos de dominio**
 
 ```ts
 // src/domain/types.ts
@@ -827,7 +836,7 @@ export interface DownloadedMedia {
 }
 ```
 
-- [ ] **Step 2: Escribir el puerto**
+- [x] **Step 2: Escribir el puerto**
 
 ```ts
 // src/domain/provider.ts
@@ -883,7 +892,7 @@ export interface MessagingProvider {
 }
 ```
 
-- [ ] **Step 3: Escribir la interfaz de log**
+- [x] **Step 3: Escribir la interfaz de log**
 
 ```ts
 // src/domain/logger.ts
@@ -896,7 +905,7 @@ export interface Logger {
 export const silentLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 ```
 
-- [ ] **Step 4: Escribir el constructor de mensajes de prueba**
+- [x] **Step 4: Escribir el constructor de mensajes de prueba**
 
 Este helper lo comparten todos los archivos de test del plan, para que el mensaje de referencia esté definido en un solo lugar.
 
@@ -927,7 +936,7 @@ export function mensaje(overrides: Partial<InboundMessage> = {}): InboundMessage
 }
 ```
 
-- [ ] **Step 5: Escribir el test que falla**
+- [x] **Step 5: Escribir el test que falla**
 
 ```ts
 // tests/providers/fake.test.ts
@@ -989,12 +998,12 @@ test('waitUntilReady resuelve una vez conectado y falla si no', async () => {
 })
 ```
 
-- [ ] **Step 6: Correr el test y verificar que falla**
+- [x] **Step 6: Correr el test y verificar que falla**
 
 Run: `bun test tests/providers/fake.test.ts`
 Expected: FAIL, no resuelve `../../src/providers/fake/index.ts`.
 
-- [ ] **Step 7: Implementar el adaptador falso**
+- [x] **Step 7: Implementar el adaptador falso**
 
 ```ts
 // src/providers/fake/index.ts
@@ -1086,12 +1095,12 @@ export class FakeProvider implements MessagingProvider {
 }
 ```
 
-- [ ] **Step 8: Correr el test y verificar que pasa**
+- [x] **Step 8: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers/fake.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 9: Verificar tipos y commitear**
+- [x] **Step 9: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -1124,7 +1133,7 @@ Tres correcciones surgieron al implementar esta tarea y valen para las que sigue
 2. **Interpolar un `Date` en un template `sql` de Drizzle no aplica el encoder de la columna.** El driver recibe el `Date` sin codificar y falla. Hay que envolverlo en `sql.param(valor, columna)`. El `COALESCE` dentro del `GREATEST` sí es necesario y no es el que prohíbe la skill de Drizzle: `lastMessageAt` es nullable y `GREATEST` con un operando NULL devuelve NULL, lo que borraría el timestamp.
 3. **En los tests, leer timestamps con `handle.sql` crudo devuelve strings, no `Date`.** `drizzle()` reemplaza los parsers del cliente postgres.js para los OID de fecha (1082, 1083, 1114, 1184) por funciones identidad, porque hace su propio mapeo por columna, y esa mutación afecta al cliente compartido. Los tests leen con `db.select()`, que aplica el decoder de la columna. Las columnas de texto, booleanos y enteros no están afectadas.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/store/repositories.test.ts
@@ -1393,12 +1402,12 @@ test('insertMessage revierte el insert si falla la actualización de actividad',
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/store/repositories.test.ts`
 Expected: FAIL, no resuelve los módulos de repositorios.
 
-- [ ] **Step 3: Implementar el repositorio de conversaciones**
+- [x] **Step 3: Implementar el repositorio de conversaciones**
 
 ```ts
 // src/store/repositories/conversations.ts
@@ -1465,7 +1474,7 @@ export async function upsertParticipant(
 }
 ```
 
-- [ ] **Step 4: Implementar el repositorio de mensajes**
+- [x] **Step 4: Implementar el repositorio de mensajes**
 
 ```ts
 // src/store/repositories/messages.ts
@@ -1548,12 +1557,12 @@ export async function countMessagesInConversation(db: Db, conversationId: string
 }
 ```
 
-- [ ] **Step 5: Correr el test y verificar que pasa**
+- [x] **Step 5: Correr el test y verificar que pasa**
 
 Run: `bun test tests/store/repositories.test.ts`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 6: Verificar tipos y commitear**
+- [x] **Step 6: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -1579,7 +1588,7 @@ git commit -m "feat: repositorios idempotentes de conversaciones y mensajes"
 
 La decisión es una función pura sin base de datos, para poder testear los tres modos sin infraestructura. La carga desde la base es una función aparte.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/capture/policy.test.ts
@@ -1608,12 +1617,12 @@ test('whitelist vacía no captura nada', () => {
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/capture/policy.test.ts`
 Expected: FAIL, no resuelve `../../src/capture/policy.ts`.
 
-- [ ] **Step 3: Implementar la política**
+- [x] **Step 3: Implementar la política**
 
 ```ts
 // src/capture/policy.ts
@@ -1636,7 +1645,7 @@ export function shouldCapture(policy: CapturePolicy, conversationExternalId: str
 }
 ```
 
-- [ ] **Step 4: Implementar la carga desde la base**
+- [x] **Step 4: Implementar la carga desde la base**
 
 ```ts
 // src/store/repositories/capture-policy.ts
@@ -1659,7 +1668,7 @@ export async function loadCapturePolicy(db: Db, provider: ProviderId): Promise<C
 }
 ```
 
-- [ ] **Step 5: Testear la carga desde la base**
+- [x] **Step 5: Testear la carga desde la base**
 
 El test del paso 1 cubre solo la función pura. `loadCapturePolicy` concentra las dos decisiones que se rompen en silencio: el fallback de modo y el filtro por proveedor. Un fallback mal resuelto dejaría de capturar todo sin que falle nada.
 
@@ -1718,12 +1727,12 @@ test('devuelve solo las reglas del proveedor solicitado', async () => {
 })
 ```
 
-- [ ] **Step 6: Correr los tests y verificar que pasan**
+- [x] **Step 6: Correr los tests y verificar que pasan**
 
 Run: `bun test tests/capture/policy.test.ts tests/store/capture-policy.test.ts`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 7: Commitear**
+- [x] **Step 7: Commitear**
 
 ```bash
 bun run typecheck
@@ -1749,7 +1758,7 @@ Al llenarse descarta el elemento más antiguo y lleva la cuenta de descartes, qu
 
 `dropped` es un total acumulado de por vida, no por vaciado: `drain()` no lo resetea, porque el pipeline lo usa para reportar cuánto se perdió desde que arrancó el proceso.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/capture/buffer.test.ts
@@ -1842,12 +1851,12 @@ test('requeueFront con un lote mayor al límite conserva los más nuevos', () =>
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/capture/buffer.test.ts`
 Expected: FAIL, no resuelve `../../src/capture/buffer.ts`.
 
-- [ ] **Step 3: Implementar el buffer**
+- [x] **Step 3: Implementar el buffer**
 
 ```ts
 // src/capture/buffer.ts
@@ -1893,12 +1902,12 @@ export class BoundedBuffer<T> {
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+- [x] **Step 4: Correr el test y verificar que pasa**
 
 Run: `bun test tests/capture/buffer.test.ts`
 Expected: PASS, 11 tests.
 
-- [ ] **Step 5: Commitear**
+- [x] **Step 5: Commitear**
 
 ```bash
 bun run typecheck
@@ -1927,7 +1936,7 @@ Dos ausencias deliberadas en `IngestDeps`:
 
 Los metadatos de adjuntos se escriben siempre, no solo cuando el mensaje es nuevo. El insert es idempotente por el índice único `(message_id, external_id)`, y escribirlo sin condición es lo que lo hace autoreparable: `insertMessage` commitea antes, así que si el insert de adjuntos falla, el mensaje ya quedó y un `inserted: false` en el reintento haría que los adjuntos no se escribieran nunca. Condicionarlo solo ahorraba un insert por reentrega, y ese ahorro era el que introducía la pérdida.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/capture/ingest.test.ts
@@ -2265,12 +2274,12 @@ test('flushBuffer descarta reintentos viejos antes que llegadas nuevas', async (
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/capture/ingest.test.ts`
 Expected: FAIL, no resuelve `../../src/capture/ingest.ts`.
 
-- [ ] **Step 3: Implementar el repositorio de adjuntos**
+- [x] **Step 3: Implementar el repositorio de adjuntos**
 
 ```ts
 // src/store/repositories/attachments.ts
@@ -2301,7 +2310,7 @@ export async function insertAttachments(
 }
 ```
 
-- [ ] **Step 4: Implementar el pipeline**
+- [x] **Step 4: Implementar el pipeline**
 
 ```ts
 // src/capture/ingest.ts
@@ -2410,7 +2419,7 @@ export function createIngestPipeline(deps: IngestDeps) {
 }
 ```
 
-- [ ] **Step 5: Correr los tests y verificar que pasan**
+- [x] **Step 5: Correr los tests y verificar que pasan**
 
 Run: `bun test tests/capture/ingest.test.ts`
 Expected: PASS, 9 tests.
@@ -2419,7 +2428,7 @@ Los cuatro primeros cubren el camino feliz; los otros cinco cubren el de conting
 
 `insertMessage` corre en una transacción, así que el trigger sobre `messages` revierte ese insert, pero `upsertConversation` corrió antes y commiteó por su cuenta: las aserciones sobre el estado de la base tienen que decir lo que realmente queda, no lo que quedaría más prolijo.
 
-- [ ] **Step 6: Verificar tipos y commitear**
+- [x] **Step 6: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -2451,7 +2460,7 @@ Tres decisiones que no son obvias:
 
 Los contactos, ubicaciones, encuestas y reacciones quedan afuera a propósito: el dominio no tiene cómo representarlos todavía.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/providers/whatsapp/normalize.test.ts
@@ -2729,12 +2738,12 @@ test('normaliza una nota de video con su respuesta citada', () => {
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/providers/whatsapp/normalize.test.ts`
 Expected: FAIL, no resuelve `normalize.ts`.
 
-- [ ] **Step 3: Implementar la normalización**
+- [x] **Step 3: Implementar la normalización**
 
 ```ts
 // src/providers/whatsapp/normalize.ts
@@ -2917,12 +2926,12 @@ export function normalizeWAMessage(
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+- [x] **Step 4: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers/whatsapp/normalize.test.ts`
 Expected: PASS, 20 tests. Si alguna propiedad de `proto.IMessage` no existe con ese nombre en la versión instalada, verificar contra `node_modules/baileys/WAProto/index.d.ts` antes de cambiar el test: la versión instalada es un release candidate y los nombres del plan no alcanzan como fuente de verdad.
 
-- [ ] **Step 5: Verificar tipos y commitear**
+- [x] **Step 5: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -2958,7 +2967,7 @@ Para que todo eso sea testeable sin red, el constructor acepta una factory de so
 
 `waitUntilReady` cancela su `setTimeout` en cuanto la espera se resuelve por cualquier camino. Sin eso el timer mantiene el event loop despierto hasta dos minutos, lo que al bot no le molesta pero deja al comando de listado de la Tarea 12 sin poder terminar.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/providers/registry.test.ts
@@ -2983,12 +2992,12 @@ test('rechaza un proveedor no implementado', () => {
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [x] **Step 2: Correr el test y verificar que falla**
 
 Run: `bun test tests/providers/registry.test.ts`
 Expected: FAIL, no resuelve `registry.ts`.
 
-- [ ] **Step 3: Implementar el adaptador de WhatsApp**
+- [x] **Step 3: Implementar el adaptador de WhatsApp**
 
 ```ts
 // src/providers/whatsapp/index.ts
@@ -3375,7 +3384,7 @@ export class WhatsAppProvider implements MessagingProvider {
 }
 ```
 
-- [ ] **Step 4: Implementar la factory**
+- [x] **Step 4: Implementar la factory**
 
 ```ts
 // src/providers/registry.ts
@@ -3406,14 +3415,14 @@ export function createProvider(
 }
 ```
 
-- [ ] **Step 5: Correr el test y verificar que pasa**
+- [x] **Step 5: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers`
 Expected: PASS, 39 tests.
 
 Ojo con el test del proveedor no implementado: `ProviderId` ya incluye `'telegram'`, `'slack'` y `'gmail'`, porque el tipo describe los canales que el diseño contempla y no los que están implementados. Así que ese caso no lleva `@ts-expect-error`: no hay error de tipos que suprimir y una directiva sin usar rompe el typecheck. El `default` del switch es un camino real y alcanzable.
 
-- [ ] **Step 6: Verificar tipos y commitear**
+- [x] **Step 6: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -3451,7 +3460,7 @@ Dos cosas que salieron de la revisión y no son obvias:
 
   La alternativa era reclamar la fila con un `UPDATE ... RETURNING` atómico. Arregla el tope pero no la descarga duplicada, porque `download_status` recién pasa a `'ok'` cuando los bytes ya llegaron, así que el perdedor sigue viendo una fila sin reclamar. Hacerlo funcionar pide un estado en curso más un lease con timestamp para recuperarse de una caída en medio de la descarga, y eso es complejidad comprada para un despliegue que es un proceso en la máquina de una persona.
 
-- [ ] **Step 1: Preparar el adaptador falso**
+- [x] **Step 1: Preparar el adaptador falso**
 
 En `src/providers/fake/index.ts`, junto a `failNextSend` y `sent`, que ya tienen esta forma:
 
@@ -3461,7 +3470,7 @@ En `src/providers/fake/index.ts`, junto a `failNextSend` y `sent`, que ya tienen
 
 Además, `downloadAttachment` devolvía `sizeBytes: 0`. Que devuelva un tamaño determinista distinto de cero: `markAttachmentDownloaded` sobrescribe el tamaño informado por el canal con el realmente descargado, y con un cero eso no se distingue de no haber escrito nada.
 
-- [ ] **Step 2: Escribir los tests que fallan**
+- [x] **Step 2: Escribir los tests que fallan**
 
 ```ts
 // tests/capture/media.test.ts
@@ -3778,12 +3787,12 @@ test('deja de reintentar una descarga al agotar el tope', async () => {
 })
 ```
 
-- [ ] **Step 3: Correr los tests y verificar que fallan**
+- [x] **Step 3: Correr los tests y verificar que fallan**
 
 Run: `bun test tests/capture/media.test.ts`
 Expected: FAIL, no resuelve `../../src/capture/media.ts`.
 
-- [ ] **Step 4: Agregar las funciones al repositorio de adjuntos**
+- [x] **Step 4: Agregar las funciones al repositorio de adjuntos**
 
 Primero, en la cabecera de `src/store/repositories/attachments.ts`, ampliar el import de `drizzle-orm` con los helpers que hagan falta: `and`, `eq`, `lt`, `ne` y `sql`.
 
@@ -3837,7 +3846,7 @@ export async function markAttachmentFailed(
 }
 ```
 
-- [ ] **Step 5: Implementar la descarga**
+- [x] **Step 5: Implementar la descarga**
 
 ```ts
 // src/capture/media.ts
@@ -3915,7 +3924,7 @@ export function createMediaDownloader(deps: MediaDeps) {
 }
 ```
 
-- [ ] **Step 6: Conectar la descarga al pipeline**
+- [x] **Step 6: Conectar la descarga al pipeline**
 
 En `src/capture/ingest.ts`: agregar `provider: MessagingProvider` a `IngestDeps`, crear el descargador una sola vez con `createMediaDownloader` al construir el pipeline, y llamarlo en `persist` después de `insertAttachments`.
 
@@ -3923,12 +3932,12 @@ La Tarea 8 dejó `insertAttachments` sin el bloque `if (inserted)`, así que no 
 
 Los tests de `tests/capture/ingest.test.ts` construyen el pipeline sin `provider`; hay que pasárselo ahora que es requerido.
 
-- [ ] **Step 7: Correr los tests y verificar que pasan**
+- [x] **Step 7: Correr los tests y verificar que pasan**
 
 Run: `bun test tests/capture/`
 Expected: PASS, todos los tests de captura incluidos los cinco nuevos.
 
-- [ ] **Step 8: Verificar tipos y commitear**
+- [x] **Step 8: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
@@ -4145,11 +4154,14 @@ export interface Shutdown {
 }
 
 /**
- * Apagado ordenado: primero vacía el buffer, después suelta los recursos.
+ * Apagado ordenado: primero corta la entrada, después vacía el buffer y recién ahí
+ * suelta los recursos.
  *
- * El orden importa. Si desconectáramos antes de vaciar, un Ctrl-C entre dos
- * reintentos periódicos tiraría mensajes que la base ya podía aceptar, que es
- * justo lo que el buffer existe para evitar.
+ * El orden importa. Desconectar no toca el buffer, así que cerrar la entrada primero
+ * no cuesta nada: el vaciado que sigue igual levanta lo que había. Vaciar primero, en
+ * cambio, deja afuera al mensaje que estaba en vuelo cuando llegó la señal —el
+ * proveedor lo espera al desconectar, su persistencia falla contra una base que ya se
+ * está yendo y cae al buffer después del último intento, donde no lo lee nadie—.
  */
 export function createShutdown(deps: ShutdownDeps): Shutdown {
   /** Último recurso: si el canal de avisos es lo que falla, el apagado igual sigue. */
@@ -4207,6 +4219,7 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
   async function correr(): Promise<number> {
     let perdidos = 0
     await paso('no se pudo cortar el reintento del buffer', () => deps.stopRetries())
+    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
     const vaciado = await paso('quedó a medias el vaciado del buffer', async () => {
       perdidos = await vaciar()
     })
@@ -4214,7 +4227,6 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
     // paso después de que la pérdida ya ocurrió, y ese es el número que decide si el proceso
     // sale con cero: perderlo acá es anunciar un apagado limpio que tiró mensajes.
     if (!vaciado) perdidos = deps.pipeline.bufferSize
-    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
     await paso('no se pudo cerrar la base', () => deps.closeDb())
     await paso('no se pudo anunciar el final', () => deps.log.info('apagado completo'))
     return perdidos
@@ -4232,7 +4244,9 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
 }
 ```
 
-Cuatro detalles que costaron una ronda de revisión cada uno:
+Cinco detalles que costaron una ronda de revisión cada uno:
+
+**El orden de los pasos se invirtió después.** El plan original vaciaba antes de desconectar, con el argumento de que desconectar primero tiraría mensajes que la base todavía podía aceptar. El argumento no se sostenía: desconectar no toca el buffer, así que el vaciado posterior levanta lo mismo. Y vaciar primero sí perdía algo: el mensaje que estaba en vuelo cuando llegó la señal. `disconnect` lo espera antes de soltar el socket, su persistencia falla contra una base que ya se está yendo, y cae al buffer justo después del último intento, donde no lo lee nadie. El test `persiste el mensaje que estaba en vuelo cuando llegó la señal` fija el caso.
 
 **El vaciado detecta la pérdida por dos caminos.** `flushBuffer` atrapa el error por mensaje y reencola, así que no rechaza: el camino que se dispara de verdad es el `bufferSize > 0` posterior. El `try/catch` cubre el día en que eso cambie.
 
@@ -4242,7 +4256,7 @@ Cuatro detalles que costaron una ronda de revisión cada uno:
 
 **El reintento cuesta una pasada extra.** Cuando lo que queda es genuinamente impersistible, el segundo `flushBuffer()` reintenta cada mensaje y falla de nuevo: la cota es 2x, medida en 4 s con 1000 mensajes a 2 ms de intento. Es barato al lado de perder un mensaje salvable, y con la interfaz actual el apagado no puede distinguir "quedó algo que nunca tuvo su intento" de "quedó algo que ya falló".
 
-Tests en `tests/shutdown.test.ts` (10): orden de los pasos como lista, pérdida parcial, reintento por lo que entró durante el vaciado anterior, vaciado que falla, dos señales concurrentes, `enCurso`, fallo del proveedor, fallo de la base, aviso roto que no borra la cuenta, y causa circular que no borra la cuenta. El fake del pipeline descuenta lo persistido de un contador de pendientes: con un `bufferSize` fijo, los tests pasarían igual si la pérdida se midiera **antes** del último intento.
+Tests en `tests/shutdown.test.ts` (11): orden de los pasos como lista, mensaje en vuelo durante la desconexión, pérdida parcial, reintento por lo que entró durante el vaciado anterior, vaciado que falla, dos señales concurrentes, `enCurso`, fallo del proveedor, fallo de la base, aviso roto que no borra la cuenta, y causa circular que no borra la cuenta. El fake del pipeline descuenta lo persistido de un contador de pendientes: con un `bufferSize` fijo, los tests pasarían igual si la pérdida se midiera **antes** del último intento.
 
 - [x] **Step 9: Implementar el punto de entrada**
 
@@ -4269,7 +4283,7 @@ bun test
 bun run typecheck
 ```
 
-Expected: 118 tests en verde sobre 16 archivos y sin errores de tipos.
+Expected: la suite en verde y sin errores de tipos. Al cerrar la tarea eran 118 tests sobre 16 archivos; con los arreglos de la revisión final quedaron 143 sobre 18.
 
 - [ ] **Step 11: Prueba manual de vinculación**
 
@@ -4294,16 +4308,26 @@ git commit -m "feat: punto de entrada de captura y listado de conversaciones"
 
 ## Verificación final del plan
 
-- [ ] `bun test` pasa completo
-- [ ] `bun run typecheck` sin errores
-- [ ] El bot se vincula, lista los grupos y persiste mensajes reales en Postgres
-- [ ] Ningún archivo de `src/capture`, `src/store` o `src/domain` importa `baileys`
-- [ ] `data/` y `.env` no aparecen en `git status`
+- [x] `bun test` pasa completo
+- [x] `bun run typecheck` sin errores
+- [ ] El bot se vincula, lista los grupos y persiste mensajes reales en Postgres — **pendiente**, es lo mismo que el Paso 11 de la Tarea 12: hace falta un teléfono
+- [x] Ningún archivo de `src/capture`, `src/store` o `src/domain` importa `baileys` — lo verifica `tests/arquitectura.test.ts` en cada corrida, ya no es un chequeo a ojo
+- [x] `data/` y `.env` no aparecen en `git status`
 
 ## Planes siguientes
 
-Este plan deja un capturador funcionando. Lo que resta, en orden, cada uno con su propio plan:
+Este plan deja un capturador completo, con la salvedad de que la vinculación con un teléfono real nunca se probó (Tarea 12, Paso 11). Lo que resta, en orden, cada uno con su propio plan:
 
 1. **Cola de salida y bucle de control**: tablas `outbound_messages`, `bot_messages` y `pending_clarifications`, el despachador con reintentos y fijación de `messageId`, y el módulo de control que distingue tus mensajes de los del bot. Deja un bot que contesta en el grupo, todavía sin resumir.
 2. **Resúmenes**: registry de proveedores del AI SDK, intérprete de lenguaje natural con tool calling, renderizado de transcripciones con presupuesto de tokens, troceado por día en la zona horaria configurada, resumen jerárquico con caché invalidado por modelo y prompt, y las tablas de preferencias con su cascada y alias.
 3. **Media y búsqueda semántica**: enriquecimiento perezoso de audios e imágenes con caché en `attachment_derivations`, embeddings perezosos acotados por conversación y rango, e índice HNSW sobre la columna vectorial.
+
+### Pendientes que dejó la revisión final
+
+Tres cosas que se decidieron no resolver acá y hay que resolver en algún plan siguiente. Se anotan con dueño para que no queden flotando:
+
+**Un tope de tiempo para el apagado** (plan 1, junto con el despachador). Ahora que `disconnect` espera los despachos en vuelo, el apagado depende de que esos despachos terminen. Contra una base que no responde —que es exactamente el escenario en que el buffer importa—, un `persist` colgado en el timeout del driver deja el apagado esperando, y quien mandó la señal no tiene forma de saber si va a volver. Hace falta una cota: pasado ese tiempo, contar lo que quede como perdido y salir. La cota tiene que cubrir el apagado entero, no solo la desconexión, porque el vaciado posterior puede colgarse por el mismo motivo.
+
+**Qué hacer con los binarios de `raw`** (plan 3, junto con el resto del tratamiento de adjuntos). La columna guarda la carga original del proveedor, pero los binarios no sobreviven al viaje por jsonb: `mediaKey` y compañía vuelven como objetos comunes en vez de `Uint8Array`, así que `downloadMediaMessage` no los acepta y `raw` no sirve para reintentar una descarga. Codificarlos en base64 al persistir los volvería recuperables, a cambio de espacio y de una migración del histórico. Está sin decidir; hoy el único reintento real de un adjunto es que WhatsApp reentregue el mensaje.
+
+**Nadie barre los adjuntos fallidos** (plan 3, misma tanda). Consecuencia de lo anterior y del hecho de que la descarga se dispara desde la ingesta: un adjunto en `failed` que no vuelva por history sync se queda ahí. No es un bug de este plan —la alternativa era reintentar para siempre un medio que WhatsApp ya venció—, pero el plan de media necesita decidir quién los mira.
