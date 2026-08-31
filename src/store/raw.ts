@@ -49,6 +49,10 @@ function decodeValue(value: unknown): unknown {
   if (isEncodedBinary(value)) {
     return new Uint8Array(Buffer.from(value.data, 'base64'))
   }
+  // Already-decoded binaries (live Baileys payloads or a prior decodeRaw) must not be walked.
+  if (isBinary(value)) {
+    return value
+  }
   if (Array.isArray(value)) {
     return value.map(decodeValue)
   }
@@ -72,7 +76,8 @@ export function encodeRaw(raw: unknown): unknown {
 
 /**
  * Inverse of {@link encodeRaw}: restores `$bin` leaves to `Uint8Array`.
- * Values without the marker pass through unchanged.
+ * Values without the marker pass through unchanged. Safe to call on already-decoded
+ * payloads (live Baileys `Uint8Array` leaves are left intact).
  */
 export function decodeRaw(raw: unknown): unknown {
   return decodeValue(raw)

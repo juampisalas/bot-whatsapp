@@ -26,6 +26,7 @@ import type {
   ProviderId,
   SentMessage,
 } from '../../domain/types.ts'
+import { decodeRaw } from '../../store/raw.ts'
 import { createBaileysLogger } from './baileys-logger.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
@@ -514,7 +515,10 @@ export class WhatsAppProvider implements MessagingProvider {
     const download =
       this.options.downloadMedia ??
       ((raw: WAMessage) => downloadMediaMessage(raw, 'buffer', {}))
-    const buffer = await download(message.raw as WAMessage)
+    // Persist stores binaries as `{ $bin: 'b64', data }`; restore Uint8Array leaves so
+    // Baileys downloadMediaMessage can read mediaKey (and siblings) on retry.
+    const raw = decodeRaw(message.raw) as WAMessage
+    const buffer = await download(raw)
 
     const mimeType =
       message.attachments.find((attachment) => attachment.externalId === attachmentExternalId)

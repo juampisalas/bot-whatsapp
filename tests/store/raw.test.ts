@@ -49,3 +49,10 @@ test('encodeRaw encodes ArrayBuffer and Buffer', () => {
     fromBuffer: { $bin: 'b64', data: Buffer.from([9, 10]).toString('base64') },
   })
 })
+
+test('decodeRaw leaves already-decoded Uint8Array leaves intact', () => {
+  const mediaKey = new Uint8Array([1, 2, 3])
+  const decoded = decodeRaw({ mediaKey })
+  expect(decoded).toEqual({ mediaKey })
+  expect((decoded as { mediaKey: Uint8Array }).mediaKey).toBeInstanceOf(Uint8Array)
+})
