@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { DEFAULT_PREFERENCES, type ResolvedPreferences } from '../../src/agent/preferences.ts'
 import { FakeLlm } from '../../src/agent/llm/fake.ts'
+import { FakeMediaModel } from '../../src/agent/media/fake.ts'
 import {
   EMPTY_RANGE_SUMMARY,
   failedDayPlaceholder,
@@ -10,8 +11,12 @@ import {
   isComboSystemPrompt,
   isPartialSystemPrompt,
 } from '../../src/agent/summarize/prompt.ts'
+import { createIngestPipeline } from '../../src/capture/ingest.ts'
+import { FakeProvider } from '../../src/providers/fake/index.ts'
 import { upsertConversation, upsertParticipant } from '../../src/store/repositories/conversations.ts'
 import { insertMessage } from '../../src/store/repositories/messages.ts'
+import { attachments, conversations } from '../../src/store/schema.ts'
+import { mensaje } from '../helpers/fixtures.ts'
 import { openTestDb, resetTestDb } from '../helpers/db.ts'
 
 const handle = openTestDb()
@@ -69,6 +74,11 @@ async function addMessage(
 
 const twoDayRange = {
   from: new Date('2026-08-29T00:00:00.000Z'),
+  to: new Date('2026-08-31T00:00:00.000Z'),
+}
+
+const oneDayRange = {
+  from: new Date('2026-08-30T00:00:00.000Z'),
   to: new Date('2026-08-31T00:00:00.000Z'),
 }
 
@@ -187,4 +197,84 @@ test('empty range returns fixed text with zero LLM calls', async () => {
 
   expect(result).toBe(EMPTY_RANGE_SUMMARY)
   expect(llm.calls).toHaveLength(0)
+})
+
+test('enrichRange runs per bucket; second pass uses cached derivation', async () => {
+  await resetTestDb(handle.sql)
+
+  const provider = new FakeProvider()
+  const media = new FakeMediaModel()
+  const pipeline = createIngestPipeline({
+    db: handle.db,
+    provider,
+    policy: { mode: 'all', rules: new Set() },
+    bufferMax: 10,
+  })
+  provider.onMessage(pipeline.handle)
+  await provider.connect()
+  await provider.inject(
+    mensaje({
+      externalId: 'sum-audio-1',
+      text: null,
+      attachments: [
+        {
+          externalId: 'audio-1',
+          kind: 'audio',
+          mimeType: 'audio/ogg',
+          sizeBytes: 1024,
+          durationMs: 45_000,
+        },
+      ],
+      sentAt: new Date('2026-08-30T12:00:00.000Z'),
+    }),
+  )
+
+  const [conversation] = await handle.db.select({ id: conversations.id }).from(conversations)
+  const [attachment] = await handle.db
+    .select({ id: attachments.id, localPath: attachments.localPath })
+    .from(attachments)
+  if (!conversation || !attachment?.localPath) throw new Error('ingest failed')
+
+  media.enqueueTranscript(attachment.localPath, 'see you on Thursday')
+
+  const llm = new FakeLlm()
+  llm.enqueue({ text: 'day-summary' })
+
+  const request = { conversationId: conversation.id, ...oneDayRange, focus: null }
+  await summarize({
+    db: handle.db,
+    llm,
+    request,
+    preferences,
+    provider,
+    media,
+  })
+
+  expect(media.calls).toHaveLength(1)
+  const firstPartial = llm.calls.find((call) => isPartialSystemPrompt(call.system))
+  expect(firstPartial?.prompt).toContain('[voice note] see you on Thursday')
+
+  await provider.inject(
+    mensaje({
+      externalId: 'sum-text-late',
+      text: 'late note',
+      attachments: [],
+      sentAt: new Date('2026-08-30T18:00:00.000Z'),
+    }),
+  )
+
+  llm.enqueue({ text: 'day-summary-2' })
+  const callsBefore = media.calls.length
+  await summarize({
+    db: handle.db,
+    llm,
+    request,
+    preferences,
+    provider,
+    media,
+  })
+
+  expect(media.calls.length - callsBefore).toBe(0)
+  const secondPartial = llm.calls.filter((call) => isPartialSystemPrompt(call.system)).at(-1)
+  expect(secondPartial?.prompt).toContain('[voice note] see you on Thursday')
 })

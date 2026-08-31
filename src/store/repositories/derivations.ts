@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import type { Db } from '../client.ts'
 import { attachmentDerivations } from '../schema.ts'
 
@@ -23,6 +23,37 @@ export async function getDerivation(
     .limit(1)
 
   return rows[0]?.text ?? null
+}
+
+/**
+ * Loads cached derivation texts for many attachments under one model.
+ * One entry per attachment id (audio → transcript, image → description).
+ */
+export async function listDerivationsByAttachmentIds(
+  db: Db,
+  attachmentIds: string[],
+  model: string,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
+  if (attachmentIds.length === 0) return result
+
+  const rows = await db
+    .select({
+      attachmentId: attachmentDerivations.attachmentId,
+      text: attachmentDerivations.text,
+    })
+    .from(attachmentDerivations)
+    .where(
+      and(
+        inArray(attachmentDerivations.attachmentId, attachmentIds),
+        eq(attachmentDerivations.model, model),
+      ),
+    )
+
+  for (const row of rows) {
+    result.set(row.attachmentId, row.text)
+  }
+  return result
 }
 
 export async function upsertDerivation(

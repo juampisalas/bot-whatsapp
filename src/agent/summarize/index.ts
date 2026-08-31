@@ -1,11 +1,15 @@
+import type { MessagingProvider } from '../../domain/provider.ts'
 import type { Db } from '../../store/client.ts'
 import { findValidChunk, upsertChunk } from '../../store/repositories/chunks.ts'
+import { listDerivationsByAttachmentIds } from '../../store/repositories/derivations.ts'
 import { listMessagesInRange } from '../../store/repositories/message-range.ts'
 import { splitIntoDayBuckets } from '../buckets.ts'
 import type { SummaryRequest } from '../interpret.ts'
 import type { Llm } from '../llm/port.ts'
+import { enrichRange } from '../media/enrich.ts'
+import type { MediaModel } from '../media/port.ts'
 import type { ResolvedPreferences } from '../preferences.ts'
-import { renderTranscript } from '../transcript.ts'
+import { DEFAULT_TRANSCRIPT_BUDGET_CHARS, renderTranscript } from '../transcript.ts'
 import {
   SUMMARY_PROMPT_VERSION,
   buildComboSystemPrompt,
@@ -21,6 +25,9 @@ export type SummarizeInput = {
   llm: Llm
   request: SummaryRequest
   preferences: ResolvedPreferences
+  /** When both are set, each day bucket is enriched before rendering. */
+  provider?: MessagingProvider
+  media?: MediaModel
 }
 
 /**
@@ -29,7 +36,7 @@ export type SummarizeInput = {
  * results are never cached.
  */
 export async function summarize(input: SummarizeInput): Promise<string> {
-  const { db, llm, request, preferences } = input
+  const { db, llm, request, preferences, provider, media } = input
   const focus = request.focus
   const buckets = splitIntoDayBuckets(request.from, request.to, preferences.timezone)
 
@@ -56,7 +63,22 @@ export async function summarize(input: SummarizeInput): Promise<string> {
       continue
     }
 
-    const transcript = renderTranscript(loaded.messages, loaded.attachments)
+    let derivations = new Map<string, string>()
+    if (provider && media) {
+      await enrichRange(db, provider, media, request.conversationId, bucket.from, bucket.to)
+      derivations = await listDerivationsByAttachmentIds(
+        db,
+        loaded.attachments.map((attachment) => attachment.id),
+        media.model,
+      )
+    }
+
+    const transcript = renderTranscript(
+      loaded.messages,
+      loaded.attachments,
+      DEFAULT_TRANSCRIPT_BUDGET_CHARS,
+      derivations,
+    )
     try {
       const result = await llm.generate({
         system: buildPartialSystemPrompt(preferences, focus),

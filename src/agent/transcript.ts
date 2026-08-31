@@ -10,6 +10,7 @@ export type TranscriptMessage = {
 }
 
 export type TranscriptAttachment = {
+  id: string
   messageId: string
   kind: AttachmentKind
   durationMs: number | null
@@ -18,11 +19,13 @@ export type TranscriptAttachment = {
 /**
  * Renders messages as a line-oriented transcript. When the result exceeds
  * `budgetChars`, whole messages in the middle are omitted (never split).
+ * Cached transcripts/descriptions are keyed by attachment id in `derivations`.
  */
 export function renderTranscript(
   messages: TranscriptMessage[],
   attachments: TranscriptAttachment[],
   budgetChars: number = DEFAULT_TRANSCRIPT_BUDGET_CHARS,
+  derivations: ReadonlyMap<string, string> = new Map(),
 ): string {
   const byMessage = new Map<string, TranscriptAttachment[]>()
   for (const attachment of attachments) {
@@ -31,16 +34,22 @@ export function renderTranscript(
     else byMessage.set(attachment.messageId, [attachment])
   }
 
-  const lines = messages.map((message) => formatLine(message, byMessage.get(message.id) ?? []))
+  const lines = messages.map((message) =>
+    formatLine(message, byMessage.get(message.id) ?? [], derivations),
+  )
   return fitWithinBudget(lines, budgetChars)
 }
 
-function formatLine(message: TranscriptMessage, messageAttachments: TranscriptAttachment[]): string {
+function formatLine(
+  message: TranscriptMessage,
+  messageAttachments: TranscriptAttachment[],
+  derivations: ReadonlyMap<string, string>,
+): string {
   const stamp = formatTimestamp(message.sentAt)
   const bodyParts: string[] = []
   if (message.text) bodyParts.push(message.text)
   for (const attachment of messageAttachments) {
-    bodyParts.push(formatAttachmentMarker(attachment))
+    bodyParts.push(formatAttachmentMarker(attachment, derivations))
   }
   const body = bodyParts.join(' ')
   return `[${stamp}] ${message.senderName}: ${body}`
@@ -56,7 +65,16 @@ function formatTimestamp(sentAt: Date): string {
   return `${y}-${mo}-${d} ${h}:${mi}`
 }
 
-function formatAttachmentMarker(attachment: TranscriptAttachment): string {
+function formatAttachmentMarker(
+  attachment: TranscriptAttachment,
+  derivations: ReadonlyMap<string, string>,
+): string {
+  const derived = derivations.get(attachment.id)
+  if (derived != null && derived !== '') {
+    if (attachment.kind === 'audio') return `[voice note] ${derived}`
+    if (attachment.kind === 'image') return `[image] ${derived}`
+  }
+
   switch (attachment.kind) {
     case 'audio': {
       if (attachment.durationMs == null) return '[voice note]'

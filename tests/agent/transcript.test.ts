@@ -22,8 +22,8 @@ test('renders text and English attachment markers', () => {
     msg('m3', '2026-08-30T09:03:00.000Z', 'Juan', null),
   ]
   const attachments: TranscriptAttachment[] = [
-    { messageId: 'm2', kind: 'audio', durationMs: 45_000 },
-    { messageId: 'm3', kind: 'image', durationMs: null },
+    { id: 'a1', messageId: 'm2', kind: 'audio', durationMs: 45_000 },
+    { id: 'a2', messageId: 'm3', kind: 'image', durationMs: null },
   ]
 
   const transcript = renderTranscript(messages, attachments)
@@ -35,6 +35,51 @@ test('renders text and English attachment markers', () => {
       '[2026-08-30 09:03] Juan: [image]',
     ].join('\n'),
   )
+})
+
+test('audio with derivation uses voice note marker and text', () => {
+  const messages = [msg('m1', '2026-08-30T09:02:00.000Z', 'Ana', null)]
+  const attachments: TranscriptAttachment[] = [
+    { id: 'att-audio', messageId: 'm1', kind: 'audio', durationMs: 45_000 },
+  ]
+  const derivations = new Map([['att-audio', 'see you on Thursday']])
+
+  const transcript = renderTranscript(
+    messages,
+    attachments,
+    DEFAULT_TRANSCRIPT_BUDGET_CHARS,
+    derivations,
+  )
+
+  expect(transcript).toBe('[2026-08-30 09:02] Ana: [voice note] see you on Thursday')
+})
+
+test('image with derivation uses image marker and text', () => {
+  const messages = [msg('m1', '2026-08-30T09:03:00.000Z', 'Juan', null)]
+  const attachments: TranscriptAttachment[] = [
+    { id: 'att-image', messageId: 'm1', kind: 'image', durationMs: null },
+  ]
+  const derivations = new Map([['att-image', 'whiteboard with dates']])
+
+  const transcript = renderTranscript(
+    messages,
+    attachments,
+    DEFAULT_TRANSCRIPT_BUDGET_CHARS,
+    derivations,
+  )
+
+  expect(transcript).toBe('[2026-08-30 09:03] Juan: [image] whiteboard with dates')
+})
+
+test('audio without derivation keeps duration marker', () => {
+  const messages = [msg('m1', '2026-08-30T09:02:00.000Z', 'Ana', null)]
+  const attachments: TranscriptAttachment[] = [
+    { id: 'att-audio', messageId: 'm1', kind: 'audio', durationMs: 45_000 },
+  ]
+
+  const transcript = renderTranscript(messages, attachments)
+
+  expect(transcript).toBe('[2026-08-30 09:02] Ana: [voice note, 45s]')
 })
 
 test('omits middle messages when over budget without splitting lines', () => {
