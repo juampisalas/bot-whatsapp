@@ -1,0 +1,9 @@
+node_modules/
+data/
+.env
+.env.local
+*.log
+dist/
+
+# Espacio de trabajo temporal del flujo de ejecución por subagentes
+.superpowers/
