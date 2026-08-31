@@ -87,13 +87,12 @@ export const messages = pgTable(
     threadExternalId: text('thread_external_id'),
     replyToExternalId: text('reply_to_external_id'),
     /**
-     * Carga original del proveedor, sin tipar a propósito: solo el adaptador que la
-     * escribió sabe interpretarla.
+     * Provider payload, left untyped on purpose: only the adapter that wrote it knows
+     * how to interpret it.
      *
-     * No sirve para reintentar una descarga. Los binarios no sobreviven al viaje por
-     * jsonb: `mediaKey` vuelve como objeto común y no como `Uint8Array`, así que
-     * `downloadMediaMessage` no lo acepta. El único reintento que existe hoy es el que
-     * dispara una reentrega del mensaje, que trae su propia carga viva.
+     * Binary leaves are stored as `{ $bin: 'b64', data }` via `encodeRaw` so jsonb can
+     * round-trip them. Call `decodeRaw` before handing the row back to the provider
+     * (e.g. to retry a media download). Unmarked historical rows stay non-retryable.
      */
     raw: jsonb('raw'),
     /** Null hasta que una búsqueda por tema fuerza a embeddear este mensaje. */

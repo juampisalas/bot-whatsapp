@@ -8,6 +8,7 @@ import {
   upsertConversation,
   upsertParticipant,
 } from '../store/repositories/conversations.ts'
+import { encodeRaw } from '../store/raw.ts'
 import { insertMessage } from '../store/repositories/messages.ts'
 import { BoundedBuffer } from './buffer.ts'
 import { createMediaDownloader } from './media.ts'
@@ -57,7 +58,7 @@ export function createIngestPipeline(deps: IngestDeps) {
       subject: message.subject,
       threadExternalId: message.threadExternalId,
       replyToExternalId: message.replyToExternalId,
-      raw: message.raw,
+      raw: encodeRaw(message.raw),
     })
 
     // Conditional upsert fills null metadata on redelivery without clobbering known values.
