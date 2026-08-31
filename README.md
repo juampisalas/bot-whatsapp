@@ -3,10 +3,11 @@
 Bot que resume conversaciones de WhatsApp a pedido. Se vincula a tu cuenta como dispositivo
 enlazado, guarda los mensajes en Postgres y responde resúmenes en un grupo de control.
 
-Estado: la captura, el bucle de control y los resúmenes están escritos y cubiertos por tests,
-pero **todavía nadie vinculó un teléfono**. Lo que sí está comprobado corriendo: la suite
-completa, el arranque contra Postgres (incluido el LLM real con Ollama), el QR apareciendo en
-la terminal y el Ctrl-C durante esa espera. Lo que falta comprobar empieza justo después de
+Estado: la captura, el bucle de control, los resúmenes, el enriquecimiento perezoso de
+media y la búsqueda semántica están escritos y cubiertos por tests, pero **todavía nadie
+vinculó un teléfono**. Lo que sí está comprobado corriendo: la suite completa, el
+arranque contra Postgres (incluido el LLM real con Ollama), el QR apareciendo en la
+terminal y el Ctrl-C durante esa espera. Lo que falta comprobar empieza justo después de
 escanear ese QR: que los mensajes reales lleguen a la base, que los adjuntos reales bajen y
 que el bot responda de verdad en el grupo de control.
 
@@ -28,8 +29,9 @@ bun run db:migrate
 El `db:up` levanta Postgres 18 con la extensión `vector` en el puerto **5433**, para no
 pisar una instalación local en el 5432. La primera vez también crea la base de tests.
 
-Con el proveedor por defecto (`ollama`), Ollama tiene que estar arriba y el modelo de
-`LLM_MODEL` descargado (`ollama pull …`) antes de pedir un resumen.
+Con el proveedor por defecto (`ollama`), Ollama tiene que estar arriba y los modelos de
+`LLM_MODEL` y `EMBEDDING_MODEL` descargados (`ollama pull …`) antes de pedir un resumen
+(sobre todo si el pedido tiene foco temático).
 
 Para conseguir el identificador del grupo de control:
 
@@ -56,9 +58,14 @@ bun start
 
 Sin `CONTROL_CONVERSATION_ID` el bot solo captura: no encola ni responde nada. Con el
 identificador configurado, los mensajes del grupo de control pasan por el bucle de control.
-Ahí pedís resúmenes (y `help`); las respuestas del bot llevan el prefijo `BOT_PREFIX`
-(`✦ `): lo que ya empieza con ese prefijo se ignora, para no reaccionar a los propios
-mensajes.
+Ahí pedís resúmenes (y `help`); podés pedir un resumen *sobre un tema* y el bot embeddea
+solo el rango pedido y filtra por similitud. Las respuestas del bot llevan el prefijo
+`BOT_PREFIX` (`✦ `): lo que ya empieza con ese prefijo se ignora, para no reaccionar a los
+propios mensajes.
+
+Las imágenes del rango se describen al resumir (visión multimodal vía el mismo
+`LLM_MODEL` / Ollama). **La transcripción de audio no está disponible con este provider**
+(ai-sdk-ollama acepta imágenes en `generateText`; no hay API de audio ni Whisper).
 
 ## Comandos
 
@@ -88,6 +95,8 @@ Lo que más se toca:
 - `LLM_MODEL`: modelo a usar (default `qwen3.6:35b-a3b` con Ollama).
 - `LLM_BASE_URL`: base de Ollama u otro endpoint compatible (default
   `http://127.0.0.1:11434`).
+- `EMBEDDING_MODEL`: modelo de embeddings (default `embeddinggemma:300m`, 768 dims).
+  Solo Ollama y OpenAI; Anthropic/DeepSeek no exponen embeddings en este adapter.
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY`: solo si usás ese provider.
 - `CAPTURE_BUFFER_MAX`: cuántos mensajes retener en memoria si Postgres no responde.
 - `SHUTDOWN_TIMEOUT_MS`: tope duro (ms) de toda la secuencia de apagado. Por defecto
@@ -204,7 +213,7 @@ Además de la prueba de vinculación con un teléfono, en este orden:
 
 1. ~~Cola de salida y bucle de control~~ — hecho
 2. ~~[Resúmenes](docs/superpowers/plans/2026-08-30-resumenes.md)~~ — hecho
-3. [Media y búsqueda semántica](docs/superpowers/plans/2026-08-30-media-y-busqueda.md)
+3. ~~[Media y búsqueda semántica](docs/superpowers/plans/2026-08-30-media-y-busqueda.md)~~ — hecho
 
 ## Diseño
 

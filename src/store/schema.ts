@@ -87,13 +87,12 @@ export const messages = pgTable(
     threadExternalId: text('thread_external_id'),
     replyToExternalId: text('reply_to_external_id'),
     /**
-     * Carga original del proveedor, sin tipar a propósito: solo el adaptador que la
-     * escribió sabe interpretarla.
+     * Provider payload, left untyped on purpose: only the adapter that wrote it knows
+     * how to interpret it.
      *
-     * No sirve para reintentar una descarga. Los binarios no sobreviven al viaje por
-     * jsonb: `mediaKey` vuelve como objeto común y no como `Uint8Array`, así que
-     * `downloadMediaMessage` no lo acepta. El único reintento que existe hoy es el que
-     * dispara una reentrega del mensaje, que trae su propia carga viva.
+     * Binary leaves are stored as `{ $bin: 'b64', data }` via `encodeRaw` so jsonb can
+     * round-trip them. Call `decodeRaw` before handing the row back to the provider
+     * (e.g. to retry a media download). Unmarked historical rows stay non-retryable.
      */
     raw: jsonb('raw'),
     /** Null hasta que una búsqueda por tema fuerza a embeddear este mensaje. */
@@ -104,6 +103,7 @@ export const messages = pgTable(
   (t) => [
     uniqueIndex('messages_provider_external_id_idx').on(t.provider, t.externalId),
     index('messages_conversation_sent_at_idx').on(t.conversationId, t.sentAt),
+    index('messages_embedding_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
   ],
 )
 
@@ -133,6 +133,27 @@ export const attachments = pgTable(
     downloadError: text('download_error'),
   },
   (t) => [uniqueIndex('attachments_message_external_id_idx').on(t.messageId, t.externalId)],
+)
+
+/**
+ * Cached transcripts and image descriptions for attachments. Keyed by
+ * attachment, derivation kind, and model so a model change does not reuse
+ * stale text.
+ */
+export const attachmentDerivations = pgTable(
+  'attachment_derivations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    attachmentId: uuid('attachment_id')
+      .notNull()
+      .references(() => attachments.id, { onDelete: 'cascade' }),
+    /** `transcript` for audio; `description` for image. */
+    kind: text('kind').$type<'transcript' | 'description'>().notNull(),
+    model: text('model').notNull(),
+    text: text('text').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('attachment_derivations_unique_idx').on(t.attachmentId, t.kind, t.model)],
 )
 
 /**

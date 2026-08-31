@@ -156,6 +156,27 @@ test('persiste un mensaje entrante de punta a punta', async () => {
   expect(rows[0]?.fromSelf).toBe(false)
 })
 
+test('encodeRaw marks binary leaves in persisted messages.raw', async () => {
+  const provider = new FakeProvider()
+  const pipeline = createPipeline(provider)
+  provider.onMessage(pipeline.handle)
+  await provider.connect()
+
+  await provider.inject(
+    mensaje({
+      externalId: 'm-raw-bin',
+      raw: { mediaKey: new Uint8Array([1, 2, 3]), caption: 'hola' },
+    }),
+  )
+
+  const rows = await handle.db.select({ raw: messages.raw }).from(messages)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.raw).toEqual({
+    mediaKey: { $bin: 'b64', data: Buffer.from([1, 2, 3]).toString('base64') },
+    caption: 'hola',
+  })
+})
+
 test('no persiste conversaciones excluidas por la política', async () => {
   const provider = new FakeProvider()
   const pipeline = createIngestPipeline({

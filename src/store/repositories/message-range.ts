@@ -11,6 +11,7 @@ export type RangeMessage = {
 }
 
 export type RangeAttachment = {
+  id: string
   messageId: string
   kind: AttachmentKind
   durationMs: number | null
@@ -65,6 +66,7 @@ export async function listMessagesInRange(
       ? []
       : await db
           .select({
+            id: attachments.id,
             messageId: attachments.messageId,
             kind: attachments.kind,
             durationMs: attachments.durationMs,
@@ -73,6 +75,7 @@ export async function listMessagesInRange(
           .where(inArray(attachments.messageId, messageIds))
 
   const rangeAttachments: RangeAttachment[] = attachmentRows.map((row) => ({
+    id: row.id,
     messageId: row.messageId,
     kind: row.kind,
     durationMs: row.durationMs,

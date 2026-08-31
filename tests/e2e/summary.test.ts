@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { eq } from 'drizzle-orm'
+import { FakeEmbedder } from '../../src/agent/llm/fake-embedder.ts'
 import { FakeLlm } from '../../src/agent/llm/fake.ts'
+import { FakeMediaModel } from '../../src/agent/media/fake.ts'
 import { isPartialSystemPrompt } from '../../src/agent/summarize/prompt.ts'
 import { createIngestPipeline } from '../../src/capture/ingest.ts'
 import { BOT_PREFIX } from '../../src/control/classify.ts'
@@ -11,7 +13,7 @@ import { FakeProvider } from '../../src/providers/fake/index.ts'
 import { upsertConversation, upsertParticipant } from '../../src/store/repositories/conversations.ts'
 import { insertMessage } from '../../src/store/repositories/messages.ts'
 import { upsertChatPreferences } from '../../src/store/repositories/preferences.ts'
-import { conversations } from '../../src/store/schema.ts'
+import { attachments, conversations } from '../../src/store/schema.ts'
 import { openTestDb, resetTestDb } from '../helpers/db.ts'
 import { mensaje } from '../helpers/fixtures.ts'
 
@@ -48,7 +50,10 @@ function summarizeOutput(overrides: Record<string, unknown> = {}) {
   }
 }
 
-async function assemble(llm: FakeLlm) {
+async function assemble(
+  llm: FakeLlm,
+  opts?: { embedder?: FakeEmbedder; media?: FakeMediaModel },
+) {
   const provider = new FakeProvider()
   await provider.connect()
   const pipeline = createIngestPipeline({
@@ -63,6 +68,9 @@ async function assemble(llm: FakeLlm) {
     config: controlConfig,
     log: silentLogger,
     llm,
+    embedder: opts?.embedder,
+    provider,
+    media: opts?.media,
   })
   const dispatcher = createDispatcher({
     db: handle.db,
@@ -94,6 +102,7 @@ async function seedTargetChat(opts?: {
   externalId?: string
   alias?: string | null
   twoDays?: boolean
+  texts?: string[]
 }): Promise<{ conversationId: string }> {
   const conversationId = await upsertConversation(handle.db, {
     provider: 'fake',
@@ -119,7 +128,23 @@ async function seedTargetChat(opts?: {
     displayName: 'Ana',
   })
 
-  if (opts?.twoDays) {
+  if (opts?.texts) {
+    for (let i = 0; i < opts.texts.length; i++) {
+      await insertMessage(handle.db, {
+        provider: 'fake',
+        externalId: `m-${crypto.randomUUID()}`,
+        conversationId,
+        participantId,
+        sentAt: new Date(`2026-08-30T${10 + i}:00:00-03:00`),
+        fromSelf: false,
+        text: opts.texts[i]!,
+        subject: null,
+        threadExternalId: null,
+        replyToExternalId: null,
+        raw: null,
+      })
+    }
+  } else if (opts?.twoDays) {
     await insertMessage(handle.db, {
       provider: 'fake',
       externalId: `m-${crypto.randomUUID()}`,
@@ -256,4 +281,110 @@ test('3: overlapping second request reuses cached partials', async () => {
 
   const partialsAfterSecond = llm.calls.filter((call) => isPartialSystemPrompt(call.system)).length
   expect(partialsAfterSecond).toBe(2)
+})
+
+test('5: focus embeds missing then reuses on second request', async () => {
+  await seedTargetChat({
+    texts: ['topic about cats', 'topic about dogs', 'unrelated weather'],
+  })
+  const embedder = new FakeEmbedder()
+  const llm = new FakeLlm()
+
+  const focusOutput = summarizeOutput({
+    range: 'today',
+    isoFrom: null,
+    isoTo: null,
+    focus: 'topic about cats',
+  })
+  llm.enqueue({ text: '', output: focusOutput })
+  llm.enqueue({ text: 'cats focus 1' })
+  llm.enqueue({ text: '', output: focusOutput })
+  llm.enqueue({ text: 'cats focus 2' })
+
+  const { provider, dispatcher } = await assemble(llm, { embedder })
+
+  await provider.inject(
+    controlRequest({ externalId: 'focus-1', text: 'summarize la facu about cats' }),
+  )
+  expect(await dispatcher.tick(new Date())).toBe(1)
+  expect(provider.sent[0]?.content.text).toBe(`${BOT_PREFIX}cats focus 1`)
+
+  const firstBatchSize = embedder.calls[0]?.length ?? 0
+  expect(firstBatchSize).toBe(3)
+  const callsAfterFirst = embedder.calls.length
+
+  await provider.inject(
+    controlRequest({ externalId: 'focus-2', text: 'summarize la facu about cats' }),
+  )
+  expect(await dispatcher.tick(new Date())).toBe(1)
+  expect(provider.sent[1]?.content.text).toBe(`${BOT_PREFIX}cats focus 2`)
+
+  const newCalls = embedder.calls.slice(callsAfterFirst)
+  expect(newCalls).toHaveLength(1)
+  expect(newCalls[0]).toEqual(['topic about cats'])
+})
+
+test('6: attachments enrich once within range and stay cached', async () => {
+  const media = new FakeMediaModel()
+  const llm = new FakeLlm()
+  llm.enqueue({
+    text: '',
+    output: summarizeOutput({ range: 'today', isoFrom: null, isoTo: null }),
+  })
+  llm.enqueue({ text: 'with audio' })
+  llm.enqueue({
+    text: '',
+    output: summarizeOutput({ range: 'today', isoFrom: null, isoTo: null }),
+  })
+
+  const { provider, dispatcher } = await assemble(llm, { media })
+
+  await provider.inject(
+    mensaje({
+      externalId: 'e2e-audio-1',
+      text: null,
+      conversation: { externalId: 'facu-media', kind: 'group', name: 'Grupo Facu' },
+      attachments: [
+        {
+          externalId: 'audio-e2e-1',
+          kind: 'audio',
+          mimeType: 'audio/ogg',
+          sizeBytes: 1024,
+          durationMs: 30_000,
+        },
+      ],
+      sentAt: new Date('2026-08-30T12:00:00-03:00'),
+    }),
+  )
+
+  const [conversation] = await handle.db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(eq(conversations.externalId, 'facu-media'))
+  if (!conversation) throw new Error('missing conversation')
+
+  await upsertChatPreferences(handle.db, conversation.id, {
+    alias: 'la facu',
+    timezone: 'America/Argentina/Buenos_Aires',
+  })
+  await handle.db
+    .update(conversations)
+    .set({ lastMessageAt: new Date('2026-08-30T12:00:00Z') })
+    .where(eq(conversations.id, conversation.id))
+
+  const [attachment] = await handle.db.select({ localPath: attachments.localPath }).from(attachments)
+  if (!attachment?.localPath) throw new Error('missing attachment')
+  media.enqueueTranscript(attachment.localPath, 'see you Thursday')
+
+  await provider.inject(controlRequest({ externalId: 'enrich-1' }))
+  expect(await dispatcher.tick(new Date())).toBe(1)
+  expect(provider.sent[0]?.content.text).toBe(`${BOT_PREFIX}with audio`)
+  expect(media.calls).toHaveLength(1)
+
+  const callsBefore = media.calls.length
+  await provider.inject(controlRequest({ externalId: 'enrich-2' }))
+  expect(await dispatcher.tick(new Date())).toBe(1)
+  // Cached day partial reused; enrichment must not run again.
+  expect(provider.sent[1]?.content.text).toBe(`${BOT_PREFIX}with audio`)
+  expect(media.calls.length - callsBefore).toBe(0)
 })

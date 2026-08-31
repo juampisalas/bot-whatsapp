@@ -11,6 +11,7 @@ import {
 } from 'ai'
 import { createOllama } from 'ai-sdk-ollama'
 import type { Config } from '../../config/index.ts'
+import { createSdkEmbedder, type Embedder } from './embedder.ts'
 import type { Llm, LlmGenerateInput, LlmGenerateResult, LlmTool } from './port.ts'
 
 const TOOL_STOP_STEPS = 4
@@ -25,6 +26,22 @@ export function createLlm(config: Config): Llm {
       return createAnthropicLlm(config)
     case 'deepseek':
       return createDeepSeekLlm(config)
+  }
+}
+
+export function createEmbedder(config: Config): Embedder {
+  switch (config.LLM_PROVIDER) {
+    case 'ollama': {
+      const ollama = createOllama({ baseURL: config.LLM_BASE_URL })
+      return createSdkEmbedder(config.EMBEDDING_MODEL, ollama.embeddingModel(config.EMBEDDING_MODEL))
+    }
+    case 'openai': {
+      const openai = createOpenAI({ apiKey: config.OPENAI_API_KEY })
+      return createSdkEmbedder(config.EMBEDDING_MODEL, openai.embeddingModel(config.EMBEDDING_MODEL))
+    }
+    case 'anthropic':
+    case 'deepseek':
+      throw new Error(`embeddings are not supported for provider ${config.LLM_PROVIDER}`)
   }
 }
 

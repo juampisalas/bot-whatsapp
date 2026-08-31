@@ -50,6 +50,7 @@ test('LLM defaults to ollama / qwen3.6:35b-a3b', () => {
   expect(config.LLM_PROVIDER).toBe('ollama')
   expect(config.LLM_MODEL).toBe('qwen3.6:35b-a3b')
   expect(config.LLM_BASE_URL).toBe('http://127.0.0.1:11434')
+  expect(config.EMBEDDING_MODEL).toBe('embeddinggemma:300m')
 })
 
 test('rejects an unknown LLM_PROVIDER', () => {
