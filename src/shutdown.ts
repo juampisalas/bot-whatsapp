@@ -31,11 +31,14 @@ export interface Shutdown {
 }
 
 /**
- * Apagado ordenado: primero vacía el buffer, después suelta los recursos.
+ * Apagado ordenado: primero corta la entrada, después vacía el buffer y recién ahí
+ * suelta los recursos.
  *
- * El orden importa. Si desconectáramos antes de vaciar, un Ctrl-C entre dos
- * reintentos periódicos tiraría mensajes que la base ya podía aceptar, que es
- * justo lo que el buffer existe para evitar.
+ * El orden importa. Desconectar no toca el buffer, así que cerrar la entrada primero
+ * no cuesta nada: el vaciado que sigue igual levanta lo que había. Vaciar primero, en
+ * cambio, deja afuera al mensaje que estaba en vuelo cuando llegó la señal —el
+ * proveedor lo espera al desconectar, su persistencia falla contra una base que ya se
+ * está yendo y cae al buffer después del último intento, donde no lo lee nadie—.
  */
 export function createShutdown(deps: ShutdownDeps): Shutdown {
   /** Último recurso: si el canal de avisos es lo que falla, el apagado igual sigue. */
@@ -93,6 +96,7 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
   async function correr(): Promise<number> {
     let perdidos = 0
     await paso('no se pudo cortar el reintento del buffer', () => deps.stopRetries())
+    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
     const vaciado = await paso('quedó a medias el vaciado del buffer', async () => {
       perdidos = await vaciar()
     })
@@ -100,7 +104,6 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
     // paso después de que la pérdida ya ocurrió, y ese es el número que decide si el proceso
     // sale con cero: perderlo acá es anunciar un apagado limpio que tiró mensajes.
     if (!vaciado) perdidos = deps.pipeline.bufferSize
-    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
     await paso('no se pudo cerrar la base', () => deps.closeDb())
     await paso('no se pudo anunciar el final', () => deps.log.info('apagado completo'))
     return perdidos

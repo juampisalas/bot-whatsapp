@@ -10,6 +10,8 @@ import type {
 
 export type InboundHandler = (message: InboundMessage) => Promise<void>
 
+export type FatalHandler = (error: Error) => void
+
 export interface MessagingProvider {
   readonly id: ProviderId
 
@@ -31,6 +33,14 @@ export interface MessagingProvider {
 
   /** Registra el manejador de mensajes entrantes. */
   onMessage(handler: InboundHandler): void
+
+  /**
+   * Registra el aviso de que el canal quedó inutilizable y no vuelve solo: hace falta
+   * intervenir, típicamente revincular. Existe porque un fallo así puede llegar mucho
+   * después de conectar, cuando `waitUntilReady` ya resolvió y no queda nadie mirando;
+   * sin este canal el proceso sigue en pie sin capturar nada y sin poder avisarlo.
+   */
+  onFatal(handler: FatalHandler): void
 
   /**
    * Envía un mensaje. `idempotencyKey` se usa como identificador del

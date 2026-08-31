@@ -9,8 +9,8 @@ import makeWASocket, {
   type WASocket,
 } from 'baileys'
 import qrcode from 'qrcode-terminal'
-import { silentLogger, type Logger } from '../../domain/logger.ts'
-import type { InboundHandler, MessagingProvider } from '../../domain/provider.ts'
+import { describirError, silentLogger, type Logger } from '../../domain/logger.ts'
+import type { FatalHandler, InboundHandler, MessagingProvider } from '../../domain/provider.ts'
 import type {
   ConversationRef,
   ConversationSummary,
@@ -48,6 +48,7 @@ export class WhatsAppProvider implements MessagingProvider {
 
   private socket: WASocket | null = null
   private handler: InboundHandler | null = null
+  private fatalHandler: FatalHandler | null = null
   private state: ConnectionState = 'idle'
   private terminalError: Error | null = null
   private generation = 0
@@ -55,6 +56,7 @@ export class WhatsAppProvider implements MessagingProvider {
   private cancelReconnectDelay: (() => void) | null = null
   private reconnectDelayMs = 1_000
   private readonly readyWaiters: ReadyWaiter[] = []
+  private readonly despachosEnVuelo = new Set<Promise<void>>()
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
 
@@ -64,6 +66,19 @@ export class WhatsAppProvider implements MessagingProvider {
 
   onMessage(handler: InboundHandler): void {
     this.handler = handler
+  }
+
+  onFatal(handler: FatalHandler): void {
+    this.fatalHandler = handler
+  }
+
+  /** El aviso corre dentro de un evento de baileys: si rompe, el cierre tiene que seguir. */
+  private emitFatal(error: Error): void {
+    try {
+      this.fatalHandler?.(error)
+    } catch (fallo) {
+      this.log.error('falló el aviso de fallo terminal', { error: describirError(fallo) })
+    }
   }
 
   async connect(): Promise<void> {
@@ -162,13 +177,33 @@ export class WhatsAppProvider implements MessagingProvider {
 
     socket.ev.on('messages.upsert', ({ messages }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      void this.dispatch(messages, socket)
+      this.seguirDespacho(this.dispatch(messages, socket))
     })
 
     socket.ev.on('messaging-history.set', ({ messages }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      void this.dispatch(messages, socket)
+      this.seguirDespacho(this.dispatch(messages, socket))
     })
+  }
+
+  /**
+   * Anota el despacho para que `disconnect` lo espere. Sin esto, un mensaje que llega
+   * junto con la señal sigue corriendo mientras el apagado cierra la base: su
+   * persistencia falla, cae al buffer, y ese buffer ya nadie lo vacía.
+   */
+  private seguirDespacho(despacho: Promise<void>): void {
+    // El seguimiento absorbe el rechazo: quien espera es el apagado, y ahí un fallo de
+    // despacho no debería impedir cerrar los recursos.
+    const seguimiento = despacho
+      .catch((error: unknown) => {
+        this.log.error('falló el despacho de mensajes entrantes', {
+          error: describirError(error),
+        })
+      })
+      .finally(() => {
+        this.despachosEnVuelo.delete(seguimiento)
+      })
+    this.despachosEnVuelo.add(seguimiento)
   }
 
   private async createSocket(): Promise<{
@@ -256,6 +291,10 @@ export class WhatsAppProvider implements MessagingProvider {
         { authDir: this.options.authDir },
       )
       this.settleReadyWaiters(this.terminalError)
+      // Último: quien escucha el fallo terminal suele responder apagando, y el apagado
+      // desconecta. Avisar antes dejaría a las esperas pendientes rechazando por la
+      // desconexión en vez de por el motivo real.
+      this.emitFatal(this.terminalError)
       return
     }
 
@@ -333,6 +372,9 @@ export class WhatsAppProvider implements MessagingProvider {
     const socket = this.socket
     this.socket = null
     if (socket) await this.endSocket(socket)
+    // Después de soltar el socket: la generación ya cambió, así que no entra ningún despacho
+    // nuevo y lo que queda acá es finito.
+    if (this.despachosEnVuelo.size > 0) await Promise.all([...this.despachosEnVuelo])
   }
 
   async send(

@@ -13,6 +13,12 @@ interface OpcionesEntorno {
    * drenado, así que estos quedan encolados sin haber tenido su intento.
    */
   tardios?: number
+  /**
+   * Cuántos entran al buffer durante la desconexión. Emula el mensaje que estaba en vuelo
+   * cuando llegó la señal: el proveedor lo espera antes de soltar el socket y ese intento
+   * falla contra una base que ya no responde, así que termina encolado.
+   */
+  enVuelo?: number
   fallaVaciado?: Error
   fallaDesconexion?: Error
   fallaCierreBase?: Error
@@ -62,6 +68,7 @@ function crearEntorno(opciones: OpcionesEntorno = {}) {
     provider: {
       disconnect: async () => {
         orden.push('desconectar')
+        pendientes += opciones.enVuelo ?? 0
         if (opciones.fallaDesconexion) throw opciones.fallaDesconexion
       },
     },
@@ -73,18 +80,38 @@ function crearEntorno(opciones: OpcionesEntorno = {}) {
     log,
   })
 
-  return { shutdown, orden, infos, errores }
+  return {
+    shutdown,
+    orden,
+    infos,
+    errores,
+    get pendientes(): number {
+      return pendientes
+    },
+  }
 }
 
-test('vacía el buffer antes de desconectar y cerrar la base', async () => {
+test('desconecta antes de vaciar el buffer y cierra la base al final', async () => {
   const entorno = crearEntorno({ pendientes: 3 })
 
   expect(await entorno.shutdown.apagar()).toBe(0)
 
-  expect(entorno.orden).toEqual(['cortarReintento', 'vaciar', 'desconectar', 'cerrarBase'])
+  expect(entorno.orden).toEqual(['cortarReintento', 'desconectar', 'vaciar', 'cerrarBase'])
   expect(entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos)
     .toBe(3)
   expect(entorno.errores).toHaveLength(0)
+})
+
+test('persiste el mensaje que estaba en vuelo cuando llegó la señal', async () => {
+  const entorno = crearEntorno({ enVuelo: 1 })
+
+  // Vaciar antes de desconectar deja este mensaje encolado después del último intento:
+  // el apagado devolvería cero perdidos y nadie volvería a leer ese buffer.
+  expect(await entorno.shutdown.apagar()).toBe(0)
+
+  expect(entorno.pendientes).toBe(0)
+  expect(entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos)
+    .toBe(1)
 })
 
 test('avisa cuántos mensajes se pierden si el buffer no se vacía del todo', async () => {
@@ -104,9 +131,9 @@ test('reintenta el vaciado por lo que entró al buffer durante el anterior', asy
 
   expect(entorno.orden).toEqual([
     'cortarReintento',
-    'vaciar',
-    'vaciar',
     'desconectar',
+    'vaciar',
+    'vaciar',
     'cerrarBase',
   ])
   expect(
@@ -123,7 +150,7 @@ test('avisa cuántos mensajes se pierden si el vaciado falla', async () => {
   expect(entorno.errores).toHaveLength(1)
   expect(entorno.errores[0]?.meta?.perdidos).toBe(2)
   expect(entorno.errores[0]?.meta?.error).toBe('base caída')
-  expect(entorno.orden).toEqual(['cortarReintento', 'vaciar', 'desconectar', 'cerrarBase'])
+  expect(entorno.orden).toEqual(['cortarReintento', 'desconectar', 'vaciar', 'cerrarBase'])
 })
 
 test('dos señales seguidas apagan una sola vez', async () => {
@@ -183,9 +210,9 @@ test('un aviso roto no se reporta como pérdida ni interrumpe el apagado', async
   expect(entorno.errores.some((linea) => linea.meta?.error === 'stdout cerrado')).toBe(true)
   expect(entorno.orden).toEqual([
     'cortarReintento',
-    'vaciar',
-    'vaciar',
     'desconectar',
+    'vaciar',
+    'vaciar',
     'cerrarBase',
   ])
 })

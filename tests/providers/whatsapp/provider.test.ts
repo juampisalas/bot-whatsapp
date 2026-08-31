@@ -21,32 +21,41 @@ async function flushMicrotasks(): Promise<void> {
 
 class TestSocket {
   private readonly connectionHandlers: ((update: unknown) => void)[] = []
+  private readonly upsertHandlers: ((update: unknown) => void)[] = []
   endCalls = 0
+  readonly value: WASocket
 
-  constructor(private closeEventsWhenBound = 0) {}
-
-  readonly value = {
-    ev: {
-      on: (event: string, handler: (update: unknown) => void) => {
-        if (event !== 'connection.update') return
-        this.connectionHandlers.push(handler)
-        while (this.closeEventsWhenBound > 0) {
-          this.closeEventsWhenBound -= 1
-          handler({ connection: 'close', lastDisconnect: { error: undefined } })
-        }
+  constructor(
+    private closeEventsWhenBound = 0,
+    selfId = 'self@s.whatsapp.net',
+  ) {
+    this.value = {
+      ev: {
+        on: (event: string, handler: (update: unknown) => void) => {
+          if (event === 'messages.upsert') {
+            this.upsertHandlers.push(handler)
+            return
+          }
+          if (event !== 'connection.update') return
+          this.connectionHandlers.push(handler)
+          while (this.closeEventsWhenBound > 0) {
+            this.closeEventsWhenBound -= 1
+            handler({ connection: 'close', lastDisconnect: { error: undefined } })
+          }
+        },
       },
-    },
-    end: async () => {
-      this.endCalls += 1
-    },
-    sendMessage: async () => {
-      throw new Error('Baileys recibió una operación sobre un socket cerrado')
-    },
-    groupFetchAllParticipating: async () => {
-      throw new Error('Baileys recibió una operación sobre un socket cerrado')
-    },
-    user: { id: 'self@s.whatsapp.net' },
-  } as unknown as WASocket
+      end: async () => {
+        this.endCalls += 1
+      },
+      sendMessage: async () => {
+        throw new Error('Baileys recibió una operación sobre un socket cerrado')
+      },
+      groupFetchAllParticipating: async () => {
+        throw new Error('Baileys recibió una operación sobre un socket cerrado')
+      },
+      user: { id: selfId },
+    } as unknown as WASocket
+  }
 
   emitOpen(): void {
     for (const handler of this.connectionHandlers) handler({ connection: 'open' })
@@ -57,6 +66,10 @@ class TestSocket {
     for (const handler of this.connectionHandlers) {
       handler({ connection: 'close', lastDisconnect: { error } })
     }
+  }
+
+  emitUpsert(messages: unknown[]): void {
+    for (const handler of this.upsertHandlers) handler({ messages })
   }
 }
 
@@ -233,6 +246,115 @@ test('logout queda terminal para readiness y operaciones posteriores', async () 
     'La sesión de WhatsApp fue cerrada desde el teléfono',
   )
   expect(sendOutcome).toBe('La sesión de WhatsApp fue cerrada desde el teléfono')
+})
+
+function waMessageDePrueba(id: string, fromMe = false): unknown {
+  return {
+    key: { remoteJid: '5491111111111@s.whatsapp.net', id, fromMe },
+    messageTimestamp: 1788091200,
+    pushName: 'Ana',
+    message: { conversation: 'hola' },
+  }
+}
+
+test('disconnect espera el despacho que estaba en vuelo', async () => {
+  const socket = new TestSocket()
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    socketFactory: () => socket.value,
+  })
+
+  const enManejador = deferred<void>()
+  const terminaManejador = deferred<void>()
+  adapter.onMessage(async () => {
+    enManejador.resolve()
+    await terminaManejador.promise
+  })
+  await adapter.connect()
+  socket.emitOpen()
+  socket.emitUpsert([waMessageDePrueba('EN-VUELO')])
+  await enManejador.promise
+
+  let desconectado = false
+  const desconectando = adapter.disconnect().then(() => {
+    desconectado = true
+  })
+  await flushMicrotasks()
+  const antesDeTerminarElManejador = desconectado
+
+  terminaManejador.resolve()
+  await desconectando
+
+  // Si `disconnect` devuelve con el manejador corriendo, el apagado vacía un buffer al que
+  // ese mensaje todavía no llegó y cierra la base debajo de él.
+  expect(antesDeTerminarElManejador).toBe(false)
+  expect(desconectado).toBe(true)
+})
+
+test('un logout avisa por el canal de fallo terminal', async () => {
+  const socket = new TestSocket()
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    socketFactory: () => socket.value,
+  })
+
+  const fatales: string[] = []
+  adapter.onFatal((error) => fatales.push(error.message))
+  await adapter.connect()
+  socket.emitOpen()
+  socket.emitClose(DisconnectReason.loggedOut)
+
+  expect(fatales).toEqual(['La sesión de WhatsApp fue cerrada desde el teléfono'])
+})
+
+test('una caída recuperable no avisa como fallo terminal', async () => {
+  jest.useFakeTimers()
+  try {
+    const sockets: TestSocket[] = []
+    const adapter = new WhatsAppProvider({
+      authDir: './unused',
+      mediaDir: './unused',
+      socketFactory: () => {
+        const socket = new TestSocket()
+        sockets.push(socket)
+        return socket.value
+      },
+    })
+
+    const fatales: string[] = []
+    adapter.onFatal((error) => fatales.push(error.message))
+    await adapter.connect()
+    sockets[0]?.emitOpen()
+    sockets[0]?.emitClose(DisconnectReason.connectionLost)
+    jest.advanceTimersByTime(2_000)
+    await flushMicrotasks()
+
+    expect(fatales).toEqual([])
+  } finally {
+    jest.useRealTimers()
+  }
+})
+
+test('un manejador de fallo terminal que rompe no se lleva puesto el cierre', async () => {
+  const socket = new TestSocket()
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    socketFactory: () => socket.value,
+  })
+
+  adapter.onFatal(() => {
+    throw new Error('el aviso rompió')
+  })
+  await adapter.connect()
+  socket.emitOpen()
+  socket.emitClose(DisconnectReason.loggedOut)
+
+  await expect(adapter.waitUntilReady()).rejects.toThrow(
+    'La sesión de WhatsApp fue cerrada desde el teléfono',
+  )
 })
 
 test('waitUntilReady rechaza cuando vence el tiempo', async () => {

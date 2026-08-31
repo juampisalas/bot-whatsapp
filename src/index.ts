@@ -130,8 +130,19 @@ async function apagarYSalir(): Promise<void> {
   salir(await shutdown.apagar())
 }
 
+/**
+ * Un fallo terminal del proveedor sale con uno aunque no se pierda ningún mensaje: el
+ * proceso dejó de capturar y sin código de salida un supervisor lo ve sano para siempre.
+ */
+async function apagarPorFalloTerminal(error: Error): Promise<never> {
+  log.error('el proveedor no puede seguir capturando', { error: describirError(error) })
+  await shutdown.apagar()
+  process.exit(1)
+}
+
 process.on('SIGINT', () => void apagarYSalir())
 process.on('SIGTERM', () => void apagarYSalir())
+provider.onFatal((error) => void apagarPorFalloTerminal(error))
 
 // Las señales se registran antes de conectar para poder cortar la espera del QR.
 try {

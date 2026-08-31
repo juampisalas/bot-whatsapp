@@ -1,4 +1,4 @@
-import type { InboundHandler, MessagingProvider } from '../../domain/provider.ts'
+import type { FatalHandler, InboundHandler, MessagingProvider } from '../../domain/provider.ts'
 import type {
   ConversationRef,
   ConversationSummary,
@@ -29,6 +29,7 @@ export class FakeProvider implements MessagingProvider {
   readonly id: ProviderId = 'fake'
 
   private handler: InboundHandler | null = null
+  private fatalHandler: FatalHandler | null = null
   private connected = false
   private nextSendError: Error | null = null
   private readonly downloadErrors: Error[] = []
@@ -61,11 +62,20 @@ export class FakeProvider implements MessagingProvider {
     this.handler = handler
   }
 
+  onFatal(handler: FatalHandler): void {
+    this.fatalHandler = handler
+  }
+
   // Solo para tests: no forman parte del puerto MessagingProvider; no invocar desde producción.
   async inject(message: InboundMessage): Promise<void> {
     if (!this.connected) throw new Error('FakeProvider sin conectar')
     if (!this.handler) throw new Error('FakeProvider sin manejador registrado')
     await this.handler(message)
+  }
+
+  /** Dispara el canal de fallo terminal sin necesitar una sesión rota de verdad. */
+  emitFatal(error: Error): void {
+    this.fatalHandler?.(error)
   }
 
   failNextSend(error: Error): void {

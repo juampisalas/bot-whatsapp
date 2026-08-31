@@ -48,6 +48,23 @@ test('rechaza inyectar antes de conectar', async () => {
   await expect(provider.inject(mensaje())).rejects.toThrow(/sin conectar/)
 })
 
+test('avisa un fallo terminal a quien lo registró', async () => {
+  const provider = new FakeProvider()
+  const fatales: string[] = []
+  provider.onFatal((error) => fatales.push(error.message))
+  await provider.connect()
+
+  provider.emitFatal(new Error('sesión invalidada'))
+
+  expect(fatales).toEqual(['sesión invalidada'])
+})
+
+test('un fallo terminal sin nadie escuchando no rompe', () => {
+  const provider = new FakeProvider()
+
+  expect(() => provider.emitFatal(new Error('sesión invalidada'))).not.toThrow()
+})
+
 test('waitUntilReady resuelve una vez conectado y falla si no', async () => {
   const provider = new FakeProvider()
   await expect(provider.waitUntilReady()).rejects.toThrow(/sin conectar/)
