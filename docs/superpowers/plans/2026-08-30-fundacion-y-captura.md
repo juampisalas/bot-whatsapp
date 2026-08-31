@@ -2942,17 +2942,32 @@ git commit -m "feat: normalización de mensajes de WhatsApp a tipos de dominio"
 - Consumes: puerto de Task 4, `normalizeWAMessage` de Task 9
 - Produces: `class WhatsAppProvider implements MessagingProvider` construida con `{ authDir: string; mediaDir: string; log?: Logger }`, y `createProvider(id: ProviderId, config: Config): MessagingProvider`.
 
-La conexión real no se testea de forma automatizada. Lo que sí se testea es que la factory devuelva el adaptador correcto sin conectarse.
+La conexión real no se testea de forma automatizada: hace falta un teléfono y una persona escaneando un QR. Lo que sí se testea sin conectarse es la factory y todo el ciclo de vida de la conexión.
+
+El ciclo de vida es la parte más frágil del adaptador, y con un par de booleanos no alcanza. Lleva un estado explícito (`idle`, `connecting`, `open`, `reconnecting`, `loggedOut`, `closed`) más un token de generación que se incrementa en cada intento y en `disconnect`. Eso es lo que garantiza cuatro cosas que con booleanos se rompían:
+
+- **Un solo intento a la vez.** Dos eventos `close` seguidos, o un `connect()` manual mientras hay una reconexión pendiente, no pueden dejar dos sockets vivos con sus dos juegos de listeners.
+- **Los eventos de un socket viejo no mandan.** Un socket ya reemplazado que emite `close` tarde no puede apagar el estado ni agendar reconexiones.
+- **`disconnect` gana.** `connect` espera filesystem, credenciales y versión antes de tener socket; un `disconnect` en esa ventana tiene que hacer que el intento en curso cierre el socket que acaba de crear en lugar de publicarlo. Sin esto, el adaptador seguía vinculado después de un apagado explícito.
+- **La reconexión sobrevive a un fallo de setup.** Antes `handleClose` esperaba `connect()` directo: si fallaba el acceso al directorio, las credenciales o el fetch de versión, el rechazo caía en un callback lanzado con `void` —sin log, sin manejar— y no se agendaba ningún intento más. Un fallo transitorio dejaba al bot offline para siempre. Ahora los intentos automáticos van en un loop supervisado que loguea el fallo, aplica el backoff siguiente y sigue hasta abrir, hasta el logout o hasta un `disconnect`.
+
+El logout es un estado terminal con error registrado: un `waitUntilReady` posterior rechaza en el acto en lugar de esperar el timeout completo, y los métodos que necesitan socket se cierran por estado usable y no por `socket !== null`. Un `connect()` explícito limpia ese estado terminal, asumiendo que la persona ya arregló las credenciales.
+
+Para que todo eso sea testeable sin red, el constructor acepta una factory de socket opcional que por defecto es `makeWASocket`. Es una costura de test, no generalidad especulativa: sin ella no hay forma determinista de provocar las carreras.
+
+`waitUntilReady` cancela su `setTimeout` en cuanto la espera se resuelve por cualquier camino. Sin eso el timer mantiene el event loop despierto hasta dos minutos, lo que al bot no le molesta pero deja al comando de listado de la Tarea 12 sin poder terminar.
 
 - [ ] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/providers/registry.test.ts
-import { test, expect } from 'bun:test'
-import { createProvider } from '../../src/providers/registry.ts'
+import { expect, test } from 'bun:test'
 import { loadConfig } from '../../src/config/index.ts'
+import { createProvider } from '../../src/providers/registry.ts'
 
-const config = loadConfig({ DATABASE_URL: 'postgres://bot:bot@localhost:5433/botwhatsapp' })
+const config = loadConfig({
+  DATABASE_URL: 'postgres://bot:bot@localhost:5433/botwhatsapp',
+})
 
 test('devuelve el adaptador falso', () => {
   expect(createProvider('fake', config).id).toBe('fake')
@@ -2963,7 +2978,6 @@ test('devuelve el adaptador de WhatsApp sin conectar', () => {
 })
 
 test('rechaza un proveedor no implementado', () => {
-  // @ts-expect-error se prueba a propósito un valor fuera de lo soportado
   expect(() => createProvider('telegram', config)).toThrow(/no implementado/)
 })
 ```
@@ -2979,14 +2993,16 @@ Expected: FAIL, no resuelve `registry.ts`.
 // src/providers/whatsapp/index.ts
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import qrcode from 'qrcode-terminal'
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
+  type WAMessage,
   type WASocket,
 } from 'baileys'
+import qrcode from 'qrcode-terminal'
+import { silentLogger, type Logger } from '../../domain/logger.ts'
 import type { InboundHandler, MessagingProvider } from '../../domain/provider.ts'
 import type {
   ConversationRef,
@@ -2997,24 +3013,41 @@ import type {
   ProviderId,
   SentMessage,
 } from '../../domain/types.ts'
-import { silentLogger, type Logger } from '../../domain/logger.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
 export interface WhatsAppProviderOptions {
   authDir: string
   mediaDir: string
   log?: Logger
+  socketFactory?: () => WASocket | Promise<WASocket>
 }
+
+interface ReadyWaiter {
+  resolve: () => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'loggedOut'
+  | 'closed'
 
 export class WhatsAppProvider implements MessagingProvider {
   readonly id: ProviderId = 'whatsapp'
 
   private socket: WASocket | null = null
   private handler: InboundHandler | null = null
-  private closing = false
+  private state: ConnectionState = 'idle'
+  private terminalError: Error | null = null
+  private generation = 0
+  private lifecycleTask: Promise<void> | null = null
+  private cancelReconnectDelay: (() => void) | null = null
   private reconnectDelayMs = 1_000
-  private open = false
-  private readyWaiters: { resolve: () => void; reject: (error: Error) => void }[] = []
+  private readonly readyWaiters: ReadyWaiter[] = []
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
 
@@ -3027,83 +3060,166 @@ export class WhatsAppProvider implements MessagingProvider {
   }
 
   async connect(): Promise<void> {
-    this.closing = false
+    if (this.state === 'open' || this.state === 'connecting' || this.state === 'reconnecting') {
+      if (this.lifecycleTask) await this.lifecycleTask
+      return
+    }
+    if (this.lifecycleTask) {
+      await this.lifecycleTask
+      return this.connect()
+    }
+
+    // Logout is terminal until an explicit retry signals that credentials were repaired.
+    this.terminalError = null
+    this.state = 'connecting'
+    const task = this.runExplicitConnect()
+    this.lifecycleTask = task
+    try {
+      await task
+    } finally {
+      this.finishLifecycleTask(task)
+    }
+  }
+
+  private async runExplicitConnect(): Promise<void> {
+    try {
+      await this.installSocket()
+    } catch (error) {
+      if (this.state === 'connecting') this.state = 'idle'
+      throw error
+    }
+  }
+
+  private async installSocket(): Promise<boolean> {
+    const generation = ++this.generation
+    const { socket, saveCreds } = await this.createSocket()
+    if (!this.isAttemptCurrent(generation)) {
+      await this.endSocket(socket)
+      return false
+    }
+
+    const previous = this.socket
+    if (previous && previous !== socket) await this.endSocket(previous)
+    if (!this.isAttemptCurrent(generation)) {
+      await this.endSocket(socket)
+      return false
+    }
+
+    this.socket = socket
+    this.bindSocket(socket, generation, saveCreds)
+    return true
+  }
+
+  private isAttemptCurrent(generation: number): boolean {
+    return (
+      generation === this.generation &&
+      (this.state === 'connecting' || this.state === 'reconnecting')
+    )
+  }
+
+  private isCurrentSocket(socket: WASocket, generation: number): boolean {
+    return this.socket === socket && this.generation === generation
+  }
+
+  private bindSocket(
+    socket: WASocket,
+    generation: number,
+    saveCreds: () => Promise<void>,
+  ): void {
+    socket.ev.on('creds.update', () => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void saveCreds().catch((error: unknown) => {
+        this.log.error('no se pudieron guardar las credenciales de WhatsApp', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    })
+
+    socket.ev.on('connection.update', (update) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      if (update.qr) {
+        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
+        // Baileys exposes only the QR payload; linked-device setup requires rendering it.
+        qrcode.generate(update.qr, { small: true })
+      }
+      if (update.connection === 'open') {
+        this.reconnectDelayMs = 1_000
+        this.state = 'open'
+        this.settleReadyWaiters()
+        this.log.info('conexión establecida con WhatsApp')
+      }
+      if (update.connection === 'close') {
+        this.handleClose(socket, generation, update.lastDisconnect?.error)
+      }
+    })
+
+    socket.ev.on('messages.upsert', ({ messages }) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void this.dispatch(messages, socket)
+    })
+
+    socket.ev.on('messaging-history.set', ({ messages }) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void this.dispatch(messages, socket)
+    })
+  }
+
+  private async createSocket(): Promise<{
+    socket: WASocket
+    saveCreds: () => Promise<void>
+  }> {
+    if (this.options.socketFactory) {
+      return {
+        socket: await this.options.socketFactory(),
+        saveCreds: async () => {},
+      }
+    }
+
     await mkdir(this.options.authDir, { recursive: true })
     await mkdir(this.options.mediaDir, { recursive: true })
 
     const { state, saveCreds } = await useMultiFileAuthState(this.options.authDir)
     const { version } = await fetchLatestBaileysVersion()
-
-    // No se pasa `printQRInTerminal`: está deprecado en esta versión, solo
-    // emite una advertencia y no dibuja nada. Baileys exige manejar el QR
-    // desde el evento `connection.update`, que es lo que se hace abajo.
     const socket = makeWASocket({
       auth: state,
       version,
       syncFullHistory: true,
     })
-    this.socket = socket
-
-    socket.ev.on('creds.update', () => {
-      void saveCreds()
-    })
-
-    socket.ev.on('connection.update', (update) => {
-      if (update.qr) {
-        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
-        // `update.qr` es la carga cruda; hay que dibujarla para que sea
-        // escaneable. Imprimirla como texto no sirve.
-        qrcode.generate(update.qr, { small: true })
-      }
-      if (update.connection === 'open') {
-        this.reconnectDelayMs = 1_000
-        this.open = true
-        for (const waiter of this.readyWaiters.splice(0)) waiter.resolve()
-        this.log.info('conexión establecida con WhatsApp')
-      }
-      if (update.connection === 'close') {
-        void this.handleClose(update.lastDisconnect?.error)
-      }
-    })
-
-    socket.ev.on('messages.upsert', ({ messages }) => {
-      void this.dispatch(messages)
-    })
-
-    socket.ev.on('messaging-history.set', ({ messages }) => {
-      void this.dispatch(messages)
-    })
+    return { socket, saveCreds }
   }
 
-  /**
-   * Espera a que la sesión esté utilizable. El tiempo por defecto es
-   * generoso porque la primera vez incluye que una persona escanee el QR.
-   */
   async waitUntilReady(timeoutMs = 120_000): Promise<void> {
-    if (this.open) return
+    if (this.state === 'open') return
+    if (this.terminalError) throw this.terminalError
     await new Promise<void>((resolve, reject) => {
-      const waiter = { resolve, reject }
-      this.readyWaiters.push(waiter)
-      setTimeout(() => {
+      let waiter: ReadyWaiter
+      const timer = setTimeout(() => {
         const index = this.readyWaiters.indexOf(waiter)
         if (index === -1) return
         this.readyWaiters.splice(index, 1)
+        clearTimeout(waiter.timer)
         reject(new Error(`La conexión no estuvo lista en ${timeoutMs} ms`))
       }, timeoutMs)
+      waiter = { resolve, reject, timer }
+      this.readyWaiters.push(waiter)
     })
   }
 
-  private failReadyWaiters(error: Error): void {
-    for (const waiter of this.readyWaiters.splice(0)) waiter.reject(error)
+  private settleReadyWaiters(error?: Error): void {
+    for (const waiter of this.readyWaiters.splice(0)) {
+      clearTimeout(waiter.timer)
+      if (error) waiter.reject(error)
+      else waiter.resolve()
+    }
   }
 
-  private async dispatch(waMessages: readonly unknown[]): Promise<void> {
+  private async dispatch(waMessages: readonly WAMessage[], socket: WASocket): Promise<void> {
     const handler = this.handler
-    const selfJid = this.socket?.user?.id
+    const selfJid = socket.user?.id
     if (!handler || !selfJid) return
 
     for (const raw of waMessages) {
-      const normalized = normalizeWAMessage(raw as Parameters<typeof normalizeWAMessage>[0], selfJid)
+      const normalized = normalizeWAMessage(raw, selfJid)
       if (!normalized) continue
       try {
         await handler(normalized)
@@ -3116,37 +3232,100 @@ export class WhatsAppProvider implements MessagingProvider {
     }
   }
 
-  private async handleClose(error: unknown): Promise<void> {
-    this.open = false
-    if (this.closing) return
-
+  private handleClose(socket: WASocket, generation: number, error: unknown): void {
+    if (!this.isCurrentSocket(socket, generation)) return
+    this.socket = null
     const statusCode =
       typeof error === 'object' && error !== null && 'output' in error
         ? (error as { output?: { statusCode?: number } }).output?.statusCode
         : undefined
 
     if (statusCode === DisconnectReason.loggedOut) {
+      this.state = 'loggedOut'
+      this.generation += 1
+      this.terminalError = new Error('La sesión de WhatsApp fue cerrada desde el teléfono')
       this.log.error(
         'la sesión se cerró desde el teléfono: borrá el directorio de credenciales y volvé a vincular',
         { authDir: this.options.authDir },
       )
-      this.failReadyWaiters(new Error('La sesión de WhatsApp fue cerrada desde el teléfono'))
+      this.settleReadyWaiters(this.terminalError)
       return
     }
 
-    const delay = this.reconnectDelayMs
-    this.reconnectDelayMs = Math.min(delay * 2, 60_000)
-    this.log.warn('conexión caída, reintentando', { enMs: delay })
-    await new Promise((resolve) => setTimeout(resolve, delay))
-    if (!this.closing) await this.connect()
+    this.state = 'reconnecting'
+    this.startReconnectLoop()
+  }
+
+  private startReconnectLoop(): void {
+    if (this.lifecycleTask) return
+    const task = this.runReconnectLoop()
+    this.lifecycleTask = task
+    void task.finally(() => {
+      this.finishLifecycleTask(task)
+    })
+  }
+
+  private finishLifecycleTask(task: Promise<void>): void {
+    if (this.lifecycleTask !== task) return
+    this.lifecycleTask = null
+    if (this.state === 'reconnecting' && this.socket === null) {
+      this.startReconnectLoop()
+    }
+  }
+
+  private async runReconnectLoop(): Promise<void> {
+    while (this.state === 'reconnecting') {
+      const delay = this.reconnectDelayMs
+      this.reconnectDelayMs = Math.min(delay * 2, 60_000)
+      this.log.warn('conexión caída, reintentando', { enMs: delay })
+      await this.waitForReconnectDelay(delay)
+      if (this.state !== 'reconnecting') return
+
+      try {
+        const installed = await this.installSocket()
+        if (installed) return
+      } catch (error) {
+        if (this.state !== 'reconnecting') return
+        this.log.error('falló la preparación de la conexión de WhatsApp', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
+  private async waitForReconnectDelay(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const finish = () => {
+        if (timer) clearTimeout(timer)
+        if (this.cancelReconnectDelay === finish) this.cancelReconnectDelay = null
+        resolve()
+      }
+      this.cancelReconnectDelay = finish
+      timer = setTimeout(finish, delayMs)
+    })
+  }
+
+  private async endSocket(socket: WASocket): Promise<void> {
+    try {
+      await socket.end(undefined)
+    } catch (error) {
+      this.log.warn('falló el cierre del socket de WhatsApp', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   async disconnect(): Promise<void> {
-    this.closing = true
-    this.open = false
-    this.failReadyWaiters(new Error('Se cerró la conexión antes de estar lista'))
-    this.socket?.end(undefined)
+    const error = new Error('Se cerró la conexión antes de estar lista')
+    this.generation += 1
+    this.state = 'closed'
+    this.terminalError = error
+    this.cancelReconnectDelay?.()
+    this.settleReadyWaiters(error)
+    const socket = this.socket
     this.socket = null
+    if (socket) await this.endSocket(socket)
   }
 
   async send(
@@ -3154,13 +3333,13 @@ export class WhatsAppProvider implements MessagingProvider {
     content: OutboundContent,
     idempotencyKey: string,
   ): Promise<SentMessage> {
-    if (!this.socket) throw new Error('WhatsAppProvider sin conectar')
-    const sent = await this.socket.sendMessage(
+    const socket = this.usableSocket()
+    const sent = await socket.sendMessage(
       target.externalId,
       { text: content.text },
       { messageId: idempotencyKey },
     )
-    return { externalId: sent?.key?.id ?? idempotencyKey }
+    return { externalId: sent?.key.id ?? idempotencyKey }
   }
 
   async downloadAttachment(
@@ -3172,20 +3351,25 @@ export class WhatsAppProvider implements MessagingProvider {
       'buffer',
       {},
     )
+    // Normalization emits one attachment per message, so the attachment id only names its bytes.
     const localPath = join(this.options.mediaDir, attachmentExternalId.replace(/[/:]/g, '_'))
-    await Bun.write(localPath, buffer as Uint8Array)
-    return { localPath, sizeBytes: (buffer as Uint8Array).byteLength }
+    await Bun.write(localPath, buffer)
+    return { localPath, sizeBytes: buffer.byteLength }
   }
 
   async listConversations(): Promise<ConversationSummary[]> {
-    if (!this.socket) throw new Error('WhatsAppProvider sin conectar')
-    const groups = await this.socket.groupFetchAllParticipating()
+    const groups = await this.usableSocket().groupFetchAllParticipating()
     return Object.values(groups).map((group) => ({
       externalId: group.id,
-      kind: 'group' as const,
+      kind: 'group',
       name: group.subject ?? null,
       participantCount: group.participants?.length ?? null,
     }))
+  }
+
+  private usableSocket(): WASocket {
+    if (this.state === 'open' && this.socket) return this.socket
+    throw this.terminalError ?? new Error('WhatsAppProvider sin conectar')
   }
 }
 ```
@@ -3195,13 +3379,17 @@ export class WhatsAppProvider implements MessagingProvider {
 ```ts
 // src/providers/registry.ts
 import type { Config } from '../config/index.ts'
+import type { Logger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
 import type { ProviderId } from '../domain/types.ts'
-import type { Logger } from '../domain/logger.ts'
 import { FakeProvider } from './fake/index.ts'
 import { WhatsAppProvider } from './whatsapp/index.ts'
 
-export function createProvider(id: ProviderId, config: Config, log?: Logger): MessagingProvider {
+export function createProvider(
+  id: ProviderId,
+  config: Config,
+  log?: Logger,
+): MessagingProvider {
   switch (id) {
     case 'fake':
       return new FakeProvider()
@@ -3219,8 +3407,10 @@ export function createProvider(id: ProviderId, config: Config, log?: Logger): Me
 
 - [ ] **Step 5: Correr el test y verificar que pasa**
 
-Run: `bun test tests/providers/registry.test.ts`
-Expected: PASS, 3 tests.
+Run: `bun test tests/providers`
+Expected: PASS, 39 tests.
+
+Ojo con el test del proveedor no implementado: `ProviderId` ya incluye `'telegram'`, `'slack'` y `'gmail'`, porque el tipo describe los canales que el diseño contempla y no los que están implementados. Así que ese caso no lleva `@ts-expect-error`: no hay error de tipos que suprimir y una directiva sin usar rompe el typecheck. El `default` del switch es un camino real y alcanzable.
 
 - [ ] **Step 6: Verificar tipos y commitear**
 
