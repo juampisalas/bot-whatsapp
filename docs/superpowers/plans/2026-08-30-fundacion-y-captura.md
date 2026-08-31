@@ -2440,13 +2440,23 @@ git commit -m "feat: pipeline de ingesta con buffer de contingencia"
 
 Un `WAMessage` de Baileys anida el contenido de formas distintas según el tipo, y los mensajes efímeros o con vista única lo envuelven una o dos veces más. La normalización desenvuelve y traduce a nuestro tipo plano.
 
+Para desenvolver se usa `normalizeMessageContent`, que Baileys exporta, en lugar de una versión propia. Cubre nueve envoltorios en cinco iteraciones: `ephemeralMessage`, `viewOnceMessage`, `documentWithCaptionMessage`, `viewOnceMessageV2`, `viewOnceMessageV2Extension`, `editedMessage`, `associatedChildMessage`, `groupStatusMessage` y `groupStatusMessageV2`. Mantener una lista paralela contra una dependencia en release candidate es una batalla perdida, y el objetivo de esta función es justamente esconder las formas de Baileys: conviene heredar su propia definición de qué es un envoltorio. Devuelve `undefined` y no `null` cuando no hay contenido.
+
+Tres decisiones que no son obvias:
+
+- **Un timestamp ausente o no numérico devuelve `null`.** `Number(x ?? 0)` lo convertiría en `1970-01-01`, que después queda como `lastMessageAt` y desordena la actividad de la conversación con algo que parece un dato real. Tampoco sirve usar la hora actual: el history sync entrega mensajes viejos, así que "ahora" estaría mal justo cuando el orden importa. Una clave de orden inventada es peor que declarar el mensaje ininterpretable, que es lo que esta función ya hace en otros casos.
+- **`pushName` nombra la conversación solo en los DM entrantes.** `pushName` es el nombre del autor. En un DM que manda el bot, el autor es el bot pero `conversation.externalId` es el JID del contacto, y como `upsertConversation` toma cualquier nombre no nulo como metadato nuevo, terminaría sobrescribiendo el nombre del contacto con el del bot. Es la misma distinción autor-conversación que hace que los grupos no tengan nombre acá.
+- **`ptvMessage` se trata igual que `videoMessage`.** Las notas de video de WhatsApp usan la misma forma `IVideoMessage`; sin esto no tienen texto ni medio reconocido y el mensaje se descarta entero.
+
+Los contactos, ubicaciones, encuestas y reacciones quedan afuera a propósito: el dominio no tiene cómo representarlos todavía.
+
 - [ ] **Step 1: Escribir el test que falla**
 
 ```ts
 // tests/providers/whatsapp/normalize.test.ts
-import { test, expect } from 'bun:test'
-import { normalizeWAMessage } from '../../../src/providers/whatsapp/normalize.ts'
+import { expect, test } from 'bun:test'
 import type { WAMessage } from 'baileys'
+import { normalizeWAMessage } from '../../../src/providers/whatsapp/normalize.ts'
 
 const SELF = '5491100000000@s.whatsapp.net'
 
@@ -2458,7 +2468,12 @@ function waMessage(overrides: Record<string, unknown> = {}): WAMessage {
       fromMe: false,
       participant: '5491111111111@s.whatsapp.net',
     },
-    messageTimestamp: 1756555200,
+    messageTimestamp: {
+      low: 1788091200,
+      high: 0,
+      unsigned: true,
+      toString: () => '1788091200',
+    },
     pushName: 'Ana',
     message: { conversation: 'hola gente' },
     ...overrides,
@@ -2467,6 +2482,7 @@ function waMessage(overrides: Record<string, unknown> = {}): WAMessage {
 
 test('normaliza un mensaje de texto de grupo', () => {
   const result = normalizeWAMessage(waMessage(), SELF)
+
   expect(result).not.toBeNull()
   expect(result?.externalId).toBe('ABC123')
   expect(result?.text).toBe('hola gente')
@@ -2483,8 +2499,23 @@ test('detecta una conversación uno a uno', () => {
     waMessage({ key: { remoteJid: '5491111111111@s.whatsapp.net', id: 'X1', fromMe: false } }),
     SELF,
   )
+
   expect(result?.conversation.kind).toBe('dm')
+  expect(result?.conversation.name).toBe('Ana')
   expect(result?.sender?.externalId).toBe('5491111111111@s.whatsapp.net')
+})
+
+test('no usa el nombre propio como nombre de una conversación saliente', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      key: { remoteJid: '5491111111111@s.whatsapp.net', id: 'X1-OUT', fromMe: true },
+      pushName: 'Mi Nombre',
+    }),
+    SELF,
+  )
+
+  expect(result?.conversation.name).toBeNull()
+  expect(result?.sender?.externalId).toBe(SELF)
 })
 
 test('marca fromSelf cuando el mensaje es propio', () => {
@@ -2492,6 +2523,7 @@ test('marca fromSelf cuando el mensaje es propio', () => {
     waMessage({ key: { remoteJid: '120363000000000000@g.us', id: 'X2', fromMe: true } }),
     SELF,
   )
+
   expect(result?.fromSelf).toBe(true)
   expect(result?.sender?.externalId).toBe(SELF)
 })
@@ -2501,6 +2533,7 @@ test('extrae el texto de un mensaje extendido', () => {
     waMessage({ message: { extendedTextMessage: { text: 'con formato' } } }),
     SELF,
   )
+
   expect(result?.text).toBe('con formato')
 })
 
@@ -2511,6 +2544,7 @@ test('desenvuelve mensajes efímeros', () => {
     }),
     SELF,
   )
+
   expect(result?.text).toBe('desaparece')
 })
 
@@ -2523,6 +2557,7 @@ test('traduce una nota de voz a un adjunto de audio', () => {
     }),
     SELF,
   )
+
   expect(result?.attachments).toHaveLength(1)
   expect(result?.attachments[0]?.kind).toBe('audio')
   expect(result?.attachments[0]?.durationMs).toBe(45000)
@@ -2532,20 +2567,164 @@ test('traduce una nota de voz a un adjunto de audio', () => {
 test('toma el caption de una imagen como texto', () => {
   const result = normalizeWAMessage(
     waMessage({
-      message: { imageMessage: { mimetype: 'image/jpeg', caption: 'mirá esto', fileLength: 1000 } },
+      message: {
+        imageMessage: { mimetype: 'image/jpeg', caption: 'mirá esto', fileLength: 1000 },
+      },
     }),
     SELF,
   )
+
   expect(result?.text).toBe('mirá esto')
   expect(result?.attachments[0]?.kind).toBe('image')
 })
 
 test('devuelve null si falta la clave o el id', () => {
-  expect(normalizeWAMessage(waMessage({ key: { remoteJid: null, id: null } }), SELF)).toBeNull()
+  expect(
+    normalizeWAMessage(waMessage({ key: { remoteJid: null, id: 'HAS-ID' } }), SELF),
+  ).toBeNull()
+  expect(
+    normalizeWAMessage(
+      waMessage({ key: { remoteJid: '5491111111111@s.whatsapp.net', id: null } }),
+      SELF,
+    ),
+  ).toBeNull()
 })
 
 test('devuelve null para mensajes sin contenido interpretable', () => {
   expect(normalizeWAMessage(waMessage({ message: {} }), SELF)).toBeNull()
+})
+
+test('detecta una respuesta de texto', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        extendedTextMessage: {
+          text: 'respuesta',
+          contextInfo: { stanzaId: 'QUOTED-TEXT' },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.replyToExternalId).toBe('QUOTED-TEXT')
+})
+
+test('detecta una respuesta enviada con una imagen', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        imageMessage: {
+          mimetype: 'image/jpeg',
+          caption: 'respuesta visual',
+          contextInfo: { stanzaId: 'QUOTED-IMAGE' },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.replyToExternalId).toBe('QUOTED-IMAGE')
+})
+
+test('desenvuelve mensajes de vista única', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: { viewOnceMessage: { message: { imageMessage: { caption: 'una vez' } } } },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('una vez')
+  expect(result?.attachments[0]?.kind).toBe('image')
+})
+
+test('desenvuelve mensajes de vista única V2', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: { viewOnceMessageV2: { message: { conversation: 'una vez V2' } } },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('una vez V2')
+})
+
+test('desenvuelve mensajes de vista única V2 Extension', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        viewOnceMessageV2Extension: {
+          message: { imageMessage: { caption: 'extensión de vista única' } },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('extensión de vista única')
+  expect(result?.attachments[0]?.kind).toBe('image')
+})
+
+test('desenvuelve dos capas anidadas', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        ephemeralMessage: {
+          message: {
+            viewOnceMessageV2: {
+              message: { imageMessage: { caption: 'doblemente envuelto' } },
+            },
+          },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('doblemente envuelto')
+  expect(result?.attachments[0]?.kind).toBe('image')
+})
+
+test('devuelve null si una clave válida no tiene mensaje', () => {
+  expect(normalizeWAMessage(waMessage({ message: undefined }), SELF)).toBeNull()
+})
+
+test('devuelve null si falta el timestamp', () => {
+  expect(normalizeWAMessage(waMessage({ messageTimestamp: undefined }), SELF)).toBeNull()
+})
+
+test('devuelve null si el timestamp no es numérico', () => {
+  expect(normalizeWAMessage(waMessage({ messageTimestamp: 'no-es-un-timestamp' }), SELF)).toBeNull()
+})
+
+test('normaliza una nota de video con su respuesta citada', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        ptvMessage: {
+          mimetype: 'video/mp4',
+          seconds: 12,
+          fileLength: 4096,
+          caption: 'nota de video',
+          contextInfo: { stanzaId: 'QUOTED-PTV' },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('nota de video')
+  expect(result?.attachments).toEqual([
+    {
+      externalId: 'ABC123:0',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      sizeBytes: 4096,
+      durationMs: 12000,
+    },
+  ])
+  expect(result?.replyToExternalId).toBe('QUOTED-PTV')
 })
 ```
 
@@ -2558,6 +2737,7 @@ Expected: FAIL, no resuelve `normalize.ts`.
 
 ```ts
 // src/providers/whatsapp/normalize.ts
+import { normalizeMessageContent } from 'baileys'
 import type { WAMessage, proto } from 'baileys'
 import type {
   AttachmentKind,
@@ -2565,22 +2745,6 @@ import type {
   InboundAttachment,
   InboundMessage,
 } from '../../domain/types.ts'
-
-/** Desenvuelve las capas con las que WhatsApp anida el contenido real. */
-function unwrap(content: proto.IMessage | null | undefined): proto.IMessage | null {
-  let current = content ?? null
-  for (let depth = 0; current && depth < 4; depth += 1) {
-    const inner =
-      current.ephemeralMessage?.message ??
-      current.viewOnceMessage?.message ??
-      current.viewOnceMessageV2?.message ??
-      current.documentWithCaptionMessage?.message ??
-      null
-    if (!inner) return current
-    current = inner
-  }
-  return current
-}
 
 function conversationKind(remoteJid: string): ConversationKind {
   if (remoteJid.endsWith('@g.us')) return 'group'
@@ -2597,8 +2761,7 @@ interface MediaSpec {
 }
 
 function mediaSpec(content: proto.IMessage): MediaSpec | null {
-  // `fileLength` llega como number o como Long de protobufjs según el caso,
-  // y Number() cubre las dos formas sin importar el tipo Long.
+  // Protobuf exposes fileLength as either a number or Long; Number() handles both representations.
   const toBytes = (value: unknown): number | null => {
     if (value === null || value === undefined) return null
     const parsed = Number(value)
@@ -2606,55 +2769,60 @@ function mediaSpec(content: proto.IMessage): MediaSpec | null {
   }
 
   if (content.audioMessage) {
-    const m = content.audioMessage
+    const message = content.audioMessage
     return {
       kind: 'audio',
-      mimeType: m.mimetype ?? null,
-      sizeBytes: toBytes(m.fileLength),
-      durationMs: m.seconds ? m.seconds * 1000 : null,
+      mimeType: message.mimetype ?? null,
+      sizeBytes: toBytes(message.fileLength),
+      durationMs: message.seconds ? message.seconds * 1000 : null,
       caption: null,
     }
   }
+
   if (content.imageMessage) {
-    const m = content.imageMessage
+    const message = content.imageMessage
     return {
       kind: 'image',
-      mimeType: m.mimetype ?? null,
-      sizeBytes: toBytes(m.fileLength),
+      mimeType: message.mimetype ?? null,
+      sizeBytes: toBytes(message.fileLength),
       durationMs: null,
-      caption: m.caption ?? null,
+      caption: message.caption ?? null,
     }
   }
-  if (content.videoMessage) {
-    const m = content.videoMessage
+
+  const videoMessage = content.videoMessage ?? content.ptvMessage
+  if (videoMessage) {
     return {
       kind: 'video',
-      mimeType: m.mimetype ?? null,
-      sizeBytes: toBytes(m.fileLength),
-      durationMs: m.seconds ? m.seconds * 1000 : null,
-      caption: m.caption ?? null,
+      mimeType: videoMessage.mimetype ?? null,
+      sizeBytes: toBytes(videoMessage.fileLength),
+      durationMs: videoMessage.seconds ? videoMessage.seconds * 1000 : null,
+      caption: videoMessage.caption ?? null,
     }
   }
+
   if (content.documentMessage) {
-    const m = content.documentMessage
+    const message = content.documentMessage
     return {
       kind: 'document',
-      mimeType: m.mimetype ?? null,
-      sizeBytes: toBytes(m.fileLength),
+      mimeType: message.mimetype ?? null,
+      sizeBytes: toBytes(message.fileLength),
       durationMs: null,
-      caption: m.caption ?? null,
+      caption: message.caption ?? null,
     }
   }
+
   if (content.stickerMessage) {
-    const m = content.stickerMessage
+    const message = content.stickerMessage
     return {
       kind: 'sticker',
-      mimeType: m.mimetype ?? null,
-      sizeBytes: toBytes(m.fileLength),
+      mimeType: message.mimetype ?? null,
+      sizeBytes: toBytes(message.fileLength),
       durationMs: null,
       caption: null,
     }
   }
+
   return null
 }
 
@@ -2662,12 +2830,40 @@ function plainText(content: proto.IMessage): string | null {
   return content.conversation ?? content.extendedTextMessage?.text ?? null
 }
 
-export function normalizeWAMessage(waMessage: WAMessage, selfJid: string): InboundMessage | null {
+const NORMALIZED_CONTEXT_NODES = [
+  'extendedTextMessage',
+  'imageMessage',
+  'audioMessage',
+  'videoMessage',
+  'ptvMessage',
+  'documentMessage',
+  'stickerMessage',
+] as const satisfies readonly (keyof proto.IMessage)[]
+
+function replyToExternalId(content: proto.IMessage): string | null {
+  for (const key of NORMALIZED_CONTEXT_NODES) {
+    const stanzaId = content[key]?.contextInfo?.stanzaId
+    if (stanzaId) return stanzaId
+  }
+
+  return null
+}
+
+export function normalizeWAMessage(
+  waMessage: WAMessage,
+  selfJid: string,
+): InboundMessage | null {
   const remoteJid = waMessage.key?.remoteJid
   const externalId = waMessage.key?.id
   if (!remoteJid || !externalId) return null
 
-  const content = unwrap(waMessage.message)
+  const timestampValue = waMessage.messageTimestamp
+  if (timestampValue === null || timestampValue === undefined) return null
+
+  const timestamp = Number(timestampValue)
+  if (!Number.isFinite(timestamp)) return null
+
+  const content = normalizeMessageContent(waMessage.message)
   if (!content) return null
 
   const media = mediaSpec(content)
@@ -2676,12 +2872,14 @@ export function normalizeWAMessage(waMessage: WAMessage, selfJid: string): Inbou
 
   const fromSelf = waMessage.key?.fromMe === true
   const kind = conversationKind(remoteJid)
-
   const senderJid = fromSelf
     ? selfJid
     : kind === 'group'
       ? (waMessage.key?.participant ?? null)
       : remoteJid
+  // pushName identifies the author, so it names a conversation only when that author is the DM contact.
+  const conversationName =
+    kind === 'dm' && !fromSelf ? (waMessage.pushName ?? null) : null
 
   const attachments: InboundAttachment[] = media
     ? [
@@ -2695,15 +2893,13 @@ export function normalizeWAMessage(waMessage: WAMessage, selfJid: string): Inbou
       ]
     : []
 
-  const timestamp = Number(waMessage.messageTimestamp ?? 0)
-
   return {
     provider: 'whatsapp',
     externalId,
     conversation: {
       externalId: remoteJid,
       kind,
-      name: kind === 'group' ? null : (waMessage.pushName ?? null),
+      name: conversationName,
     },
     sender: senderJid
       ? { externalId: senderJid, displayName: fromSelf ? null : (waMessage.pushName ?? null) }
@@ -2713,8 +2909,7 @@ export function normalizeWAMessage(waMessage: WAMessage, selfJid: string): Inbou
     text,
     subject: null,
     threadExternalId: null,
-    replyToExternalId:
-      content.extendedTextMessage?.contextInfo?.stanzaId ?? null,
+    replyToExternalId: replyToExternalId(content),
     attachments,
     raw: waMessage,
   }
@@ -2724,7 +2919,7 @@ export function normalizeWAMessage(waMessage: WAMessage, selfJid: string): Inbou
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
 Run: `bun test tests/providers/whatsapp/normalize.test.ts`
-Expected: PASS, 9 tests. Si alguna propiedad de `proto.IMessage` no existe con ese nombre en la versión instalada, verificar contra `node_modules/baileys/lib/Types/` antes de cambiar el test.
+Expected: PASS, 20 tests. Si alguna propiedad de `proto.IMessage` no existe con ese nombre en la versión instalada, verificar contra `node_modules/baileys/WAProto/index.d.ts` antes de cambiar el test: la versión instalada es un release candidate y los nombres del plan no alcanzan como fuente de verdad.
 
 - [ ] **Step 5: Verificar tipos y commitear**
 
