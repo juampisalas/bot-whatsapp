@@ -36,7 +36,7 @@ interface MediaSpec {
 }
 
 function mediaSpec(content: proto.IMessage): MediaSpec | null {
-  // Protobuf exposes fileLength as either a number or Long; Number() handles both representations.
+  // Protobuf entrega `fileLength` como número o como Long; `Number()` cubre las dos formas.
   const toBytes = (value: unknown): number | null => {
     if (value === null || value === undefined) return null
     const parsed = Number(value)
@@ -154,7 +154,8 @@ export function normalizeWAMessage(
     : kind === 'group'
       ? (waMessage.key?.participant ?? null)
       : remoteJid
-  // pushName identifies the author, so it names a conversation only when that author is the DM contact.
+  // `pushName` nombra al autor, así que nombra la conversación solo cuando ese autor es el
+  // contacto del chat uno a uno.
   const conversationName =
     kind === 'dm' && !fromSelf ? (waMessage.pushName ?? null) : null
 

@@ -113,7 +113,8 @@ export class WhatsAppProvider implements MessagingProvider {
       return this.connect()
     }
 
-    // Logout is terminal until an explicit retry signals that credentials were repaired.
+    // El logout es terminal hasta que un intento explícito avise que las credenciales
+    // se arreglaron.
     this.terminalError = null
     this.state = 'connecting'
     const task = this.runExplicitConnect()
@@ -183,7 +184,7 @@ export class WhatsAppProvider implements MessagingProvider {
       if (!this.isCurrentSocket(socket, generation)) return
       if (update.qr) {
         this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
-        // Baileys exposes only the QR payload; linked-device setup requires rendering it.
+        // Baileys entrega solo la carga del QR: vincular el dispositivo exige dibujarlo.
         qrcode.generate(update.qr, { small: true })
       }
       if (update.connection === 'open') {
