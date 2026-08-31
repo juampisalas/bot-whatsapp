@@ -18,6 +18,12 @@ const CAPAS_SIN_BAILEYS = ['capture', 'store', 'domain']
  */
 const IMPORTA_BAILEYS = /(?:from|import|require)\s*\(?\s*['"]baileys(?:\/[^'"]*)?['"]/
 
+/**
+ * El SDK de AI (`ai`) vive en el agente, no en la captura. Misma idea que baileys: un
+ * import accidental en `capture/` pasaría typecheck y el resto de la suite sin avisar.
+ */
+const IMPORTA_AI = /(?:from|import|require)\s*\(?\s*['"]ai(?:\/[^'"]*)?['"]/
+
 const raizDeFuentes = join(import.meta.dir, '..', 'src')
 
 // El glob recursivo hace que un subdirectorio nuevo quede cubierto sin tocar este test.
@@ -34,6 +40,19 @@ test.each(CAPAS_SIN_BAILEYS)('src/%s no importa baileys', async (capa) => {
   for (const archivo of archivos) {
     const contenido = await Bun.file(join(raizDeFuentes, capa, archivo)).text()
     if (IMPORTA_BAILEYS.test(contenido)) infractores.push(`src/${capa}/${archivo}`)
+  }
+
+  expect(infractores).toEqual([])
+})
+
+test('src/capture no importa ai', async () => {
+  const archivos = fuentesDe('capture')
+  expect(archivos.length).toBeGreaterThan(0)
+
+  const infractores: string[] = []
+  for (const archivo of archivos) {
+    const contenido = await Bun.file(join(raizDeFuentes, 'capture', archivo)).text()
+    if (IMPORTA_AI.test(contenido)) infractores.push(`src/capture/${archivo}`)
   }
 
   expect(infractores).toEqual([])
