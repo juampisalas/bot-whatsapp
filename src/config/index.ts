@@ -14,6 +14,12 @@ const schema = z.object({
   TIMEZONE: z.string().min(1).default('America/Argentina/Buenos_Aires'),
   // Levels the Logger can emit. A new one arrives together with its emitter, not before.
   LOG_LEVEL: z.enum(['info', 'warn', 'error']).default('info'),
+  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic', 'deepseek']).default('ollama'),
+  LLM_MODEL: z.string().min(1).default('qwen3.6:35b-a3b'),
+  LLM_BASE_URL: z.string().min(1).default('http://127.0.0.1:11434'),
+  OPENAI_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  DEEPSEEK_API_KEY: z.string().optional(),
 })
 
 export type Config = z.infer<typeof schema>
@@ -22,7 +28,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const parsed = schema.safeParse(env)
   if (!parsed.success) {
     const detail = parsed.error.issues
-      .map((issue) => `  ${issue.path.join('.') || '(raíz)'}: ${issue.message}`)
+      .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
       .join('\n')
     throw new Error(`Invalid environment configuration:\n${detail}`)
   }
