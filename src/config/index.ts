@@ -9,6 +9,8 @@ const schema = z.object({
   CONTROL_PROVIDER: z.enum(['whatsapp', 'fake']).default('whatsapp'),
   CONTROL_CONVERSATION_ID: z.string().optional(),
   CAPTURE_BUFFER_MAX: z.coerce.number().int().positive().default(1000),
+  // Hard deadline for the whole shutdown sequence, not only disconnect.
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
   TIMEZONE: z.string().min(1).default('America/Argentina/Buenos_Aires'),
   // Levels the Logger can emit. A new one arrives together with its emitter, not before.
   LOG_LEVEL: z.enum(['info', 'warn', 'error']).default('info'),

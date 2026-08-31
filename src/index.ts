@@ -137,6 +137,7 @@ const shutdown = createShutdown({
   closeDb: close,
   stopRetries: () => clearInterval(retryTimer),
   log,
+  timeoutMs: config.SHUTDOWN_TIMEOUT_MS,
 })
 
 /**

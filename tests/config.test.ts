@@ -32,6 +32,14 @@ test('usa info como nivel de log por defecto', () => {
   expect(loadConfig(base).LOG_LEVEL).toBe('info')
 })
 
+test('applies SHUTDOWN_TIMEOUT_MS by default', () => {
+  expect(loadConfig(base).SHUTDOWN_TIMEOUT_MS).toBe(15_000)
+})
+
+test('coerces SHUTDOWN_TIMEOUT_MS to a number', () => {
+  expect(loadConfig({ ...base, SHUTDOWN_TIMEOUT_MS: '8' }).SHUTDOWN_TIMEOUT_MS).toBe(8)
+})
+
 // El nivel solo existe si el Logger lo emite: aceptar 'debug' promete un detalle que nadie escribe.
 test('rechaza el nivel de log debug', () => {
   expect(() => loadConfig({ ...base, LOG_LEVEL: 'debug' })).toThrow(/LOG_LEVEL/)
