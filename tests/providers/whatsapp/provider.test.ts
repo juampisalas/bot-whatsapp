@@ -23,15 +23,15 @@ class TestSocket {
   private readonly connectionHandlers: ((update: unknown) => void)[] = []
   endCalls = 0
 
-  constructor(private closeWhenBound = false) {}
+  constructor(private closeEventsWhenBound = 0) {}
 
   readonly value = {
     ev: {
       on: (event: string, handler: (update: unknown) => void) => {
         if (event !== 'connection.update') return
         this.connectionHandlers.push(handler)
-        if (this.closeWhenBound) {
-          this.closeWhenBound = false
+        while (this.closeEventsWhenBound > 0) {
+          this.closeEventsWhenBound -= 1
           handler({ connection: 'close', lastDisconnect: { error: undefined } })
         }
       },
@@ -104,10 +104,10 @@ test('dos eventos close concurrentes producen un solo socket de reemplazo', asyn
   }
 })
 
-test('un close durante la publicación del socket conserva el reconnect supervisado', async () => {
+test('close concurrentes durante la publicación conservan un reconnect único', async () => {
   jest.useFakeTimers()
   try {
-    const sockets = [new TestSocket(true), new TestSocket()]
+    const sockets = [new TestSocket(2), new TestSocket()]
     let attempts = 0
     const adapter = new WhatsAppProvider({
       authDir: './unused',
