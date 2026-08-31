@@ -231,6 +231,8 @@ test('un fallo al persistir encola el mensaje y no rechaza', async () => {
   expect(warnings).toHaveLength(1)
   expect(warnings[0]?.message).toBe('no se pudo persistir, mensaje en buffer')
   expect(warnings[0]?.meta?.enBuffer).toBe(1)
+  // El apagado necesita saber cuántos mensajes se perderían si el vaciado final no alcanza.
+  expect(pipeline.bufferSize).toBe(1)
 })
 
 test('flushBuffer persiste lo encolado cuando la base se recupera', async () => {

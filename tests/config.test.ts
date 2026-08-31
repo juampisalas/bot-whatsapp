@@ -23,3 +23,12 @@ test('falla con mensaje explícito si falta DATABASE_URL', () => {
 test('rechaza un proveedor desconocido', () => {
   expect(() => loadConfig({ ...base, PROVIDER: 'telegram' })).toThrow(/PROVIDER/)
 })
+
+test('usa info como nivel de log por defecto', () => {
+  expect(loadConfig(base).LOG_LEVEL).toBe('info')
+})
+
+// El nivel solo existe si el Logger lo emite: aceptar 'debug' prometía un detalle que nadie escribe.
+test('rechaza el nivel de log debug', () => {
+  expect(() => loadConfig({ ...base, LOG_LEVEL: 'debug' })).toThrow(/LOG_LEVEL/)
+})

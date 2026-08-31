@@ -10,7 +10,8 @@ const schema = z.object({
   CONTROL_CONVERSATION_ID: z.string().optional(),
   CAPTURE_BUFFER_MAX: z.coerce.number().int().positive().default(1000),
   TIMEZONE: z.string().min(1).default('America/Argentina/Buenos_Aires'),
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // Los niveles son los que el Logger sabe emitir. Uno nuevo entra junto con su emisor, no antes.
+  LOG_LEVEL: z.enum(['info', 'warn', 'error']).default('info'),
 })
 
 export type Config = z.infer<typeof schema>

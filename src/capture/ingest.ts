@@ -108,5 +108,12 @@ export function createIngestPipeline(deps: IngestDeps) {
     return persistidos
   }
 
-  return { handle, flushBuffer }
+  return {
+    handle,
+    flushBuffer,
+    /** Lo que todavía no se pudo persistir: el apagado lo reporta como pérdida. */
+    get bufferSize(): number {
+      return buffer.size
+    },
+  }
 }
