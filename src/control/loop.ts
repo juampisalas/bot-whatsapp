@@ -1,9 +1,12 @@
 import { interpret } from '../agent/interpret.ts'
+import type { Embedder } from '../agent/llm/embedder.ts'
 import type { Llm } from '../agent/llm/port.ts'
+import type { MediaModel } from '../agent/media/port.ts'
 import { getResolvedPreferences } from '../agent/preferences.ts'
 import { summarize } from '../agent/summarize/index.ts'
 import type { Config } from '../config/index.ts'
 import { describeError, type Logger } from '../domain/logger.ts'
+import type { MessagingProvider } from '../domain/provider.ts'
 import type { InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
 import { isBotMessage } from '../store/repositories/bot-messages.ts'
@@ -20,6 +23,9 @@ export function createControlLoop(deps: {
   config: Pick<Config, 'CONTROL_PROVIDER' | 'CONTROL_CONVERSATION_ID'>
   log: Logger
   llm: Llm
+  embedder?: Embedder
+  provider?: MessagingProvider
+  media?: MediaModel
 }) {
   async function handle(message: InboundMessage): Promise<void> {
     const conversationId = deps.config.CONTROL_CONVERSATION_ID
@@ -73,6 +79,9 @@ async function buildReply(
     db: Db
     llm: Llm
     config: Pick<Config, 'CONTROL_PROVIDER' | 'CONTROL_CONVERSATION_ID'>
+    embedder?: Embedder
+    provider?: MessagingProvider
+    media?: MediaModel
   },
   message: InboundMessage,
   controlExternalId: string,
@@ -100,6 +109,9 @@ async function buildReply(
         llm: deps.llm,
         request: result.request,
         preferences,
+        embedder: deps.embedder,
+        provider: deps.provider,
+        media: deps.media,
       })
       return withBotPrefix(summary)
     }

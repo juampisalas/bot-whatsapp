@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { DEFAULT_PREFERENCES, type ResolvedPreferences } from '../../src/agent/preferences.ts'
+import { FakeEmbedder } from '../../src/agent/llm/fake-embedder.ts'
 import { FakeLlm } from '../../src/agent/llm/fake.ts'
 import { FakeMediaModel } from '../../src/agent/media/fake.ts'
 import {
@@ -197,6 +198,109 @@ test('empty range returns fixed text with zero LLM calls', async () => {
 
   expect(result).toBe(EMPTY_RANGE_SUMMARY)
   expect(llm.calls).toHaveLength(0)
+})
+
+test('focus filters transcript to similar messages only', async () => {
+  const { conversationId, participantId } = await seedConversation()
+  await addMessage(
+    conversationId,
+    participantId,
+    new Date('2026-08-30T10:00:00.000Z'),
+    'topic about cats',
+  )
+  await addMessage(
+    conversationId,
+    participantId,
+    new Date('2026-08-30T12:00:00.000Z'),
+    'unrelated weather chat',
+  )
+
+  const llm = new FakeLlm()
+  llm.enqueue({ text: 'cats-only' })
+  const embedder = new FakeEmbedder()
+
+  const result = await summarize({
+    db: handle.db,
+    llm,
+    embedder,
+    request: { conversationId, ...oneDayRange, focus: 'topic about cats' },
+    preferences,
+  })
+
+  expect(result).toBe('cats-only')
+  const partial = llm.calls.find((call) => isPartialSystemPrompt(call.system))
+  expect(partial?.prompt).toContain('topic about cats')
+  expect(partial?.prompt).not.toContain('unrelated weather chat')
+})
+
+test('focus with no similar messages yields empty-range summary', async () => {
+  const { conversationId, participantId } = await seedConversation()
+  await addMessage(
+    conversationId,
+    participantId,
+    new Date('2026-08-30T12:00:00.000Z'),
+    'zzzzz unique noise xyz',
+  )
+
+  const llm = new FakeLlm()
+  const embedder = new FakeEmbedder()
+
+  const result = await summarize({
+    db: handle.db,
+    llm,
+    embedder,
+    request: {
+      conversationId,
+      ...oneDayRange,
+      focus: 'completely different topic abc',
+    },
+    preferences,
+  })
+
+  expect(result).toBe(EMPTY_RANGE_SUMMARY)
+  expect(llm.calls).toHaveLength(0)
+})
+
+test('focus second pass embeds only the query topic', async () => {
+  const { conversationId, participantId } = await seedConversation()
+  await addMessage(
+    conversationId,
+    participantId,
+    new Date('2026-08-30T10:00:00.000Z'),
+    'topic about cats',
+  )
+  await addMessage(
+    conversationId,
+    participantId,
+    new Date('2026-08-30T11:00:00.000Z'),
+    'topic about dogs',
+  )
+
+  const llm = new FakeLlm()
+  llm.enqueue({ text: 'first' })
+  llm.enqueue({ text: 'second' })
+
+  const first = new FakeEmbedder()
+  await summarize({
+    db: handle.db,
+    llm,
+    embedder: first,
+    request: { conversationId, ...oneDayRange, focus: 'topic about cats' },
+    preferences,
+  })
+  expect(first.calls[0]?.length).toBe(2)
+
+  const second = new FakeEmbedder()
+  await summarize({
+    db: handle.db,
+    llm,
+    embedder: second,
+    request: { conversationId, ...oneDayRange, focus: 'topic about cats' },
+    preferences,
+  })
+
+  expect(second.calls).toHaveLength(1)
+  expect(second.calls[0]).toEqual(['topic about cats'])
 })
 
 test('enrichRange runs per bucket; second pass uses cached derivation', async () => {
