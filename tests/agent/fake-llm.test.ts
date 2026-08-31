@@ -15,6 +15,14 @@ test('returns an enqueued response then throws when the queue is empty', async (
   )
 })
 
+test('enqueueError records the call then throws', async () => {
+  const fake = new FakeLlm()
+  fake.enqueueError(new Error('injected'))
+
+  await expect(fake.generate({ system: 's', prompt: 'p' })).rejects.toThrow(/injected/)
+  expect(fake.calls).toHaveLength(1)
+})
+
 test('executes toolsToCall against provided tools before returning', async () => {
   const fake = new FakeLlm()
   const seen: Record<string, unknown>[] = []
