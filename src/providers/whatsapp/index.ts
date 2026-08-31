@@ -24,11 +24,31 @@ import type {
 import { createBaileysLogger } from './baileys-logger.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
+/** Los bytes de un adjunto, ya resueltos a partir de la carga original de baileys. */
+export type MediaDownloader = (message: WAMessage) => Promise<Uint8Array>
+
 export interface WhatsAppProviderOptions {
   authDir: string
   mediaDir: string
   log?: Logger
   socketFactory?: () => WASocket | Promise<WASocket>
+  /** Se inyecta por la misma razón que `socketFactory`: probar sin salir a la red. */
+  downloadMedia?: MediaDownloader
+}
+
+/** Los JIDs traen `:` para el dispositivo, y ninguno de los dos separadores va en un nombre. */
+function saneadoParaRuta(valor: string): string {
+  return valor.replace(/[/:]/g, '_')
+}
+
+/**
+ * Extensión a partir del mimetype que ya viene en el adjunto, solo cuando el subtipo es
+ * corto y alfanumérico. Los mimetypes largos de Office no dan una extensión utilizable, y
+ * el nombre sin extensión es preferible a uno con un subtipo entero pegado.
+ */
+function extensionDeMime(mimeType: string | null): string {
+  const subtipo = mimeType?.split(';')[0]?.split('/')[1]?.trim() ?? ''
+  return /^[a-z0-9]{1,8}$/i.test(subtipo) ? `.${subtipo}` : ''
 }
 
 interface ReadyWaiter {
@@ -404,13 +424,21 @@ export class WhatsAppProvider implements MessagingProvider {
     message: InboundMessage,
     attachmentExternalId: string,
   ): Promise<DownloadedMedia> {
-    const buffer = await downloadMediaMessage(
-      message.raw as Parameters<typeof downloadMediaMessage>[0],
-      'buffer',
-      {},
+    const descargar =
+      this.options.downloadMedia ??
+      ((raw: WAMessage) => downloadMediaMessage(raw, 'buffer', {}))
+    const buffer = await descargar(message.raw as WAMessage)
+
+    const mimeType =
+      message.attachments.find((adjunto) => adjunto.externalId === attachmentExternalId)
+        ?.mimeType ?? null
+    // El id de mensaje de WhatsApp es único dentro del chat, no entre chats: sin la
+    // conversación en la ruta, dos adjuntos homónimos de chats distintos se pisan el archivo.
+    const localPath = join(
+      this.options.mediaDir,
+      saneadoParaRuta(message.conversation.externalId),
+      `${saneadoParaRuta(attachmentExternalId)}${extensionDeMime(mimeType)}`,
     )
-    // Normalization emits one attachment per message, so the attachment id only names its bytes.
-    const localPath = join(this.options.mediaDir, attachmentExternalId.replace(/[/:]/g, '_'))
     await Bun.write(localPath, buffer)
     return { localPath, sizeBytes: buffer.byteLength }
   }

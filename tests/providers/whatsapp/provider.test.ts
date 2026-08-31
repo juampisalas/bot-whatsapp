@@ -1,6 +1,10 @@
-import { expect, jest, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, expect, jest, test } from 'bun:test'
 import { DisconnectReason, type WASocket } from 'baileys'
 import { WhatsAppProvider } from '../../../src/providers/whatsapp/index.ts'
+import { mensaje } from '../../helpers/fixtures.ts'
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -404,6 +408,101 @@ test('send falla claramente si no hay conexión', async () => {
 
 test('listConversations falla claramente si no hay conexión', async () => {
   await expect(provider().listConversations()).rejects.toThrow('WhatsAppProvider sin conectar')
+})
+
+const directoriosDeMedios: string[] = []
+
+afterAll(async () => {
+  for (const directorio of directoriosDeMedios) await rm(directorio, { recursive: true, force: true })
+})
+
+async function adaptadorConDescarga(bytes: Uint8Array): Promise<WhatsAppProvider> {
+  const mediaDir = await mkdtemp(join(tmpdir(), 'bot-whatsapp-medios-'))
+  directoriosDeMedios.push(mediaDir)
+  return new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir,
+    socketFactory: () => new TestSocket().value,
+    downloadMedia: async () => bytes,
+  })
+}
+
+function mensajeConAdjunto(
+  conversationExternalId: string,
+  attachmentExternalId: string,
+  mimeType: string | null = 'audio/ogg; codecs=opus',
+) {
+  return mensaje({
+    provider: 'whatsapp',
+    conversation: { externalId: conversationExternalId, kind: 'dm', name: null },
+    attachments: [
+      { externalId: attachmentExternalId, kind: 'audio', mimeType, sizeBytes: 2, durationMs: null },
+    ],
+  })
+}
+
+test('dos adjuntos con el mismo id en chats distintos no se pisan', async () => {
+  const adapter = await adaptadorConDescarga(new Uint8Array([1, 2]))
+
+  // El id de mensaje de WhatsApp es único por chat, no globalmente: dos chats pueden
+  // traer el mismo y la ruta tiene que seguir distinguiéndolos.
+  const primero = await adapter.downloadAttachment(
+    mensajeConAdjunto('5491111111111@s.whatsapp.net', 'ABC123:0'),
+    'ABC123:0',
+  )
+  const segundo = await adapter.downloadAttachment(
+    mensajeConAdjunto('120363000000000000@g.us', 'ABC123:0'),
+    'ABC123:0',
+  )
+
+  expect(primero.localPath).not.toBe(segundo.localPath)
+  expect(await Bun.file(primero.localPath).exists()).toBe(true)
+  expect(await Bun.file(segundo.localPath).exists()).toBe(true)
+})
+
+test('la ruta del adjunto sanea los separadores del JID', async () => {
+  const adapter = await adaptadorConDescarga(new Uint8Array([1, 2]))
+
+  const { localPath } = await adapter.downloadAttachment(
+    mensajeConAdjunto('5491111111111:12@s.whatsapp.net', 'AB/CD:0'),
+    'AB/CD:0',
+  )
+
+  expect(localPath).toContain('5491111111111_12@s.whatsapp.net')
+  expect(localPath.endsWith('AB_CD_0.ogg')).toBe(true)
+})
+
+test('la extensión sale del mimetype del adjunto', async () => {
+  const adapter = await adaptadorConDescarga(new Uint8Array([1, 2]))
+
+  const conMime = await adapter.downloadAttachment(
+    mensajeConAdjunto('c1@s.whatsapp.net', 'A1:0', 'image/jpeg'),
+    'A1:0',
+  )
+  const sinMime = await adapter.downloadAttachment(
+    mensajeConAdjunto('c1@s.whatsapp.net', 'A2:0', null),
+    'A2:0',
+  )
+  const raro = await adapter.downloadAttachment(
+    mensajeConAdjunto('c1@s.whatsapp.net', 'A3:0', 'application/vnd.openxmlformats-officedocument'),
+    'A3:0',
+  )
+
+  expect(conMime.localPath.endsWith('A1_0.jpeg')).toBe(true)
+  expect(sinMime.localPath.endsWith('A2_0')).toBe(true)
+  expect(raro.localPath.endsWith('A3_0')).toBe(true)
+})
+
+test('devuelve el tamaño realmente escrito', async () => {
+  const adapter = await adaptadorConDescarga(new Uint8Array([1, 2, 3, 4, 5]))
+
+  const { localPath, sizeBytes } = await adapter.downloadAttachment(
+    mensajeConAdjunto('c1@s.whatsapp.net', 'A1:0'),
+    'A1:0',
+  )
+
+  expect(sizeBytes).toBe(5)
+  expect(await Bun.file(localPath).size).toBe(5)
 })
 
 test('disconnect permite que el proceso termine sin esperar el timeout pendiente', async () => {
