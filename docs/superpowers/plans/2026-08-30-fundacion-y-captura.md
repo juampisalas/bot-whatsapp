@@ -3439,29 +3439,130 @@ git commit -m "feat: adaptador de WhatsApp y factory de proveedores"
 
 Los bytes se bajan al llegar, porque WhatsApp deja de servirlos después. El procesamiento con IA es perezoso y lo hace otro plan. Un fallo de descarga nunca impide que el mensaje quede guardado.
 
-- [ ] **Step 1: Escribir el test que falla**
+`provider` vuelve a `IngestDeps` en esta tarea. La Tarea 8 lo sacó porque el pipeline no lo usaba; acá pasa a necesitarlo, así que se agrega junto con el código que lo usa.
+
+**Qué decide si hay que descargar: la base, no el flag `inserted`.** La Tarea 8 chocó con esta misma trampa del otro lado: condicionar la escritura de metadatos a `inserted` perdía datos para siempre. Condicionar la descarga tiene el problema espejo —un adjunto que falla una vez no se reintenta nunca— y no condicionarla significa volver a bajar los mismos bytes en cada reentrega del history sync, que es constante. Así que se descarga lo que tiene `download_status` distinto de `'ok'` y menos de `MAX_DOWNLOAD_ATTEMPTS` intentos. Eso hace la descarga idempotente y autoreparable, y le da un lector real a `download_attempts`, que si no se escribe y nadie lee. El tope existe porque el medio de WhatsApp expira: sin él, cada reentrega de un mensaje viejo reintentaría para siempre algo que ya no puede funcionar.
+
+Dos cosas que salieron de la revisión y no son obvias:
+
+- **El `try` cubre solo la llamada al proveedor.** Si abarca también el `markAttachmentDownloaded`, el catch no puede distinguir "WhatsApp no dio los bytes" de "los bytes llegaron pero Postgres no aceptó el resultado", y registra el segundo caso como fallo de descarga gastando un intento. En el borde del tope eso deja la fila en `failed` con `local_path` nulo aunque el adaptador real ya escribió el archivo, y ninguna entrega posterior la revisa. Con el `try` acotado, un fallo al persistir sale como lo que es y llega al buffer de contingencia de la Tarea 8.
+- **Las descargas se serializan por mensaje y adjunto.** La entrega en vivo y el history sync llegan por callbacks distintos de Baileys que pueden intercalarse, así que dos entregas del mismo mensaje pueden ver el adjunto como elegible antes de que ninguna escriba su resultado: se baja dos veces y el tope se pasa. Se resuelve con un single-flight local al proceso que relee la elegibilidad adentro del guard, y por eso el descargador es una factory que sostiene el mapa: a nivel de módulo sería estado global que se filtra entre tests, y por llamada no serviría de nada.
+
+  La alternativa era reclamar la fila con un `UPDATE ... RETURNING` atómico. Arregla el tope pero no la descarga duplicada, porque `download_status` recién pasa a `'ok'` cuando los bytes ya llegaron, así que el perdedor sigue viendo una fila sin reclamar. Hacerlo funcionar pide un estado en curso más un lease con timestamp para recuperarse de una caída en medio de la descarga, y eso es complejidad comprada para un despliegue que es un proceso en la máquina de una persona.
+
+- [ ] **Step 1: Preparar el adaptador falso**
+
+En `src/providers/fake/index.ts`, junto a `failNextSend` y `sent`, que ya tienen esta forma:
+
+- `failNextDownload(error: Error)`, para que los tests provoquen un fallo de descarga sin reasignar el método de la instancia.
+- Un registro de las descargas pedidas, expuesto como `downloads`. Hace falta para poder afirmar que una reentrega **no** volvió a descargar.
+- Una barrera controlable, para que los tests de concurrencia sean deterministas y no dependan de tiempos.
+
+Además, `downloadAttachment` devolvía `sizeBytes: 0`. Que devuelva un tamaño determinista distinto de cero: `markAttachmentDownloaded` sobrescribe el tamaño informado por el canal con el realmente descargado, y con un cero eso no se distingue de no haber escrito nada.
+
+- [ ] **Step 2: Escribir los tests que fallan**
 
 ```ts
 // tests/capture/media.test.ts
-import { test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
+import { createIngestPipeline } from '../../src/capture/ingest.ts'
+import {
+  createMediaDownloader,
+  MAX_DOWNLOAD_ATTEMPTS,
+} from '../../src/capture/media.ts'
+import { FakeProvider } from '../../src/providers/fake/index.ts'
 import { createDb } from '../../src/store/client.ts'
 import { runMigrations } from '../../src/store/migrate.ts'
-import { createIngestPipeline } from '../../src/capture/ingest.ts'
-import { FakeProvider } from '../../src/providers/fake/index.ts'
-import type { InboundMessage } from '../../src/domain/types.ts'
+import { insertAttachments } from '../../src/store/repositories/attachments.ts'
+import { attachments, messages } from '../../src/store/schema.ts'
 import { mensaje } from '../helpers/fixtures.ts'
 
 const url = process.env.DATABASE_URL_TEST ?? 'postgres://bot:bot@localhost:5433/botwhatsapp_test'
 const handle = createDb(url)
 
-function conAudio(): InboundMessage {
+async function removeSuccessUpdateFailure(): Promise<void> {
+  const triggerRows = await handle.sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger
+      WHERE tgname = 'fail_attachment_success_update'
+        AND tgrelid = 'attachments'::regclass
+    ) AS exists
+  `
+  if (triggerRows[0]?.exists) {
+    await handle.sql`DROP TRIGGER fail_attachment_success_update ON attachments`
+  }
+
+  const functionRows = await handle.sql<{ exists: boolean }[]>`
+    SELECT to_regprocedure('fail_attachment_success_update()') IS NOT NULL AS exists
+  `
+  if (functionRows[0]?.exists) {
+    await handle.sql`DROP FUNCTION fail_attachment_success_update()`
+  }
+}
+
+async function installSuccessUpdateFailure(): Promise<void> {
+  await handle.sql`
+    CREATE FUNCTION fail_attachment_success_update()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF NEW.download_status = 'ok' THEN
+        RAISE EXCEPTION 'forced attachment success update failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$
+  `
+  await handle.sql`
+    CREATE TRIGGER fail_attachment_success_update
+    BEFORE UPDATE ON attachments
+    FOR EACH ROW
+    EXECUTE FUNCTION fail_attachment_success_update()
+  `
+}
+
+function setup() {
+  const provider = new FakeProvider()
+  const pipeline = createIngestPipeline({
+    db: handle.db,
+    provider,
+    policy: { mode: 'all', rules: new Set() },
+    bufferMax: 10,
+  })
+  provider.onMessage(pipeline.handle)
+  return { provider }
+}
+
+function messageWithAttachment(externalId = 'media-1') {
   return mensaje({
-    externalId: 'm-audio',
-    text: null,
     attachments: [
-      { externalId: 'a1', kind: 'audio', mimeType: 'audio/ogg', sizeBytes: 10, durationMs: 3000 },
+      {
+        externalId,
+        kind: 'audio',
+        mimeType: 'audio/ogg',
+        sizeBytes: 1024,
+        durationMs: 45000,
+      },
     ],
   })
+}
+
+async function setupDirectDownloader() {
+  const { provider } = setup()
+  const message = messageWithAttachment()
+  await provider.connect()
+  await provider.inject({ ...message, attachments: [] })
+  const [storedMessage] = await handle.db.select({ id: messages.id }).from(messages)
+  if (!storedMessage) throw new Error('el mensaje de prueba no se persistió')
+  await insertAttachments(handle.db, storedMessage.id, message.attachments)
+  return {
+    provider,
+    message,
+    download: createMediaDownloader({ db: handle.db, provider }),
+    messageId: storedMessage.id,
+  }
 }
 
 beforeAll(async () => {
@@ -3469,76 +3570,242 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  await removeSuccessUpdateFailure()
   await handle.sql`TRUNCATE conversations, participants, messages, attachments RESTART IDENTITY CASCADE`
 })
 
 afterAll(async () => {
+  await removeSuccessUpdateFailure()
+  await handle.sql`TRUNCATE conversations, participants, messages, attachments RESTART IDENTITY CASCADE`
   await handle.close()
 })
 
-test('marca el adjunto como descargado con su ruta local', async () => {
-  const provider = new FakeProvider()
-  const pipeline = createIngestPipeline({
-    db: handle.db,
-    policy: { mode: 'all', rules: new Set() },
-    provider,
-    bufferMax: 10,
-  })
-  provider.onMessage(pipeline.handle)
+test('marca el adjunto descargado con la ruta y el tamaño realmente descargado', async () => {
+  const { provider } = setup()
   await provider.connect()
 
-  await provider.inject(conAudio())
+  await provider.inject(messageWithAttachment())
 
-  const rows = await handle.sql<{ download_status: string; local_path: string }[]>`
-    SELECT download_status, local_path FROM attachments
-  `
-  expect(rows[0]?.download_status).toBe('ok')
-  expect(rows[0]?.local_path).toBe('/tmp/fake/a1')
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      localPath: attachments.localPath,
+      sizeBytes: attachments.sizeBytes,
+      attempts: attachments.downloadAttempts,
+      error: attachments.downloadError,
+    })
+    .from(attachments)
+  expect(rows).toEqual([
+    {
+      status: 'ok',
+      localPath: '/tmp/fake/media-1',
+      sizeBytes: 4096,
+      attempts: 0,
+      error: null,
+    },
+  ])
 })
 
-test('un fallo de descarga no impide guardar el mensaje', async () => {
-  const provider = new FakeProvider()
-  provider.downloadAttachment = async () => {
-    throw new Error('adjunto expirado')
-  }
-  const pipeline = createIngestPipeline({
-    db: handle.db,
-    policy: { mode: 'all', rules: new Set() },
-    provider,
-    bufferMax: 10,
-  })
-  provider.onMessage(pipeline.handle)
+test('un fallo de descarga conserva el mensaje y registra el intento fallido', async () => {
+  const { provider } = setup()
+  provider.failNextDownload(new Error('medio vencido'))
   await provider.connect()
 
-  await provider.inject(conAudio())
+  await provider.inject(messageWithAttachment())
 
-  const mensajes = await handle.sql`SELECT 1 FROM messages`
-  expect(mensajes).toHaveLength(1)
+  expect(await handle.db.select({ id: messages.id }).from(messages)).toHaveLength(1)
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      attempts: attachments.downloadAttempts,
+      error: attachments.downloadError,
+      localPath: attachments.localPath,
+    })
+    .from(attachments)
+  expect(rows).toEqual([
+    {
+      status: 'failed',
+      attempts: 1,
+      error: 'medio vencido',
+      localPath: null,
+    },
+  ])
+})
 
-  const adjuntos = await handle.sql<{ download_status: string; download_error: string }[]>`
-    SELECT download_status, download_error FROM attachments
-  `
-  expect(adjuntos[0]?.download_status).toBe('failed')
-  expect(adjuntos[0]?.download_error).toContain('adjunto expirado')
+test('un fallo al registrar el éxito no agota el intento y permite recuperarlo', async () => {
+  const { provider } = setup()
+  const message = messageWithAttachment()
+  await provider.connect()
+
+  for (let attempt = 1; attempt < MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    provider.failNextDownload(new Error(`fallo previo ${attempt}`))
+    await provider.inject(message)
+  }
+
+  await installSuccessUpdateFailure()
+  try {
+    await provider.inject(message)
+  } finally {
+    await removeSuccessUpdateFailure()
+  }
+  await provider.inject(message)
+
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      attempts: attachments.downloadAttempts,
+      localPath: attachments.localPath,
+    })
+    .from(attachments)
+  expect(rows).toEqual([
+    {
+      status: 'ok',
+      attempts: MAX_DOWNLOAD_ATTEMPTS - 1,
+      localPath: '/tmp/fake/media-1',
+    },
+  ])
+})
+
+test('una reentrega no vuelve a descargar un adjunto que ya está en ok', async () => {
+  const { provider } = setup()
+  const message = messageWithAttachment()
+  await provider.connect()
+
+  await provider.inject(message)
+  await provider.inject(message)
+
+  expect(provider.downloads).toHaveLength(1)
+  expect(provider.downloads[0]?.attachmentExternalId).toBe('media-1')
+})
+
+test('dos entregas concurrentes comparten una sola descarga', async () => {
+  const { provider, message, download, messageId } = await setupDirectDownloader()
+  const barrier = provider.blockDownloads()
+  provider.failNextDownload(new Error('fallo compartido'))
+  provider.failNextDownload(new Error('fallo que no debe consumirse'))
+
+  const deliveries = Promise.all([download(message, messageId), download(message, messageId)])
+  await barrier.entered
+  barrier.release()
+  await deliveries
+
+  expect(provider.downloads).toHaveLength(1)
+  const rows = await handle.db
+    .select({ attempts: attachments.downloadAttempts })
+    .from(attachments)
+  expect(rows).toEqual([{ attempts: 1 }])
+})
+
+test('una reentrega reintenta un adjunto fallido antes de agotar el tope', async () => {
+  const { provider } = setup()
+  const message = messageWithAttachment()
+  provider.failNextDownload(new Error('fallo transitorio'))
+  await provider.connect()
+
+  await provider.inject(message)
+  await provider.inject(message)
+
+  expect(provider.downloads).toHaveLength(2)
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      attempts: attachments.downloadAttempts,
+      localPath: attachments.localPath,
+    })
+    .from(attachments)
+  expect(rows).toEqual([
+    {
+      status: 'ok',
+      attempts: 1,
+      localPath: '/tmp/fake/media-1',
+    },
+  ])
+})
+
+test('entregas concurrentes no exceden el tope de intentos', async () => {
+  const { provider, message, download, messageId } = await setupDirectDownloader()
+
+  for (let attempt = 1; attempt < MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    provider.failNextDownload(new Error(`fallo previo ${attempt}`))
+    await download(message, messageId)
+  }
+
+  const barrier = provider.blockDownloads()
+  provider.failNextDownload(new Error('fallo concurrente 1'))
+  provider.failNextDownload(new Error('fallo concurrente 2'))
+  const deliveries = Promise.all([download(message, messageId), download(message, messageId)])
+  await barrier.entered
+  barrier.release()
+  await deliveries
+
+  expect(provider.downloads).toHaveLength(MAX_DOWNLOAD_ATTEMPTS)
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      attempts: attachments.downloadAttempts,
+    })
+    .from(attachments)
+  expect(rows).toEqual([{ status: 'failed', attempts: MAX_DOWNLOAD_ATTEMPTS }])
+})
+
+test('deja de reintentar una descarga al agotar el tope', async () => {
+  const { provider } = setup()
+  const message = messageWithAttachment()
+  await provider.connect()
+
+  for (let attempt = 0; attempt < MAX_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    provider.failNextDownload(new Error(`fallo ${attempt + 1}`))
+    await provider.inject(message)
+  }
+  await provider.inject(message)
+
+  expect(provider.downloads).toHaveLength(MAX_DOWNLOAD_ATTEMPTS)
+  const rows = await handle.db
+    .select({
+      status: attachments.downloadStatus,
+      attempts: attachments.downloadAttempts,
+      error: attachments.downloadError,
+    })
+    .from(attachments)
+  expect(rows).toEqual([
+    {
+      status: 'failed',
+      attempts: MAX_DOWNLOAD_ATTEMPTS,
+      error: `fallo ${MAX_DOWNLOAD_ATTEMPTS}`,
+    },
+  ])
 })
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [ ] **Step 3: Correr los tests y verificar que fallan**
 
 Run: `bun test tests/capture/media.test.ts`
-Expected: FAIL, el estado del adjunto queda en `pending` porque nadie lo descarga.
+Expected: FAIL, no resuelve `../../src/capture/media.ts`.
 
-- [ ] **Step 3: Agregar los marcadores al repositorio de adjuntos**
+- [ ] **Step 4: Agregar las funciones al repositorio de adjuntos**
 
-Primero, en la cabecera de `src/store/repositories/attachments.ts`, agregar el import que estas funciones necesitan:
+Primero, en la cabecera de `src/store/repositories/attachments.ts`, ampliar el import de `drizzle-orm` con los helpers que hagan falta: `and`, `eq`, `lt`, `ne` y `sql`.
 
-```ts
-import { and, eq, sql } from 'drizzle-orm'
-```
-
-Después, agregar las dos funciones al final del mismo archivo:
+Después, agregar las tres funciones al final del mismo archivo. `listAttachmentsToDownload` es la que decide qué falta bajar, y por eso vive en el repositorio y no en el pipeline: es la base la que sabe el estado real de cada adjunto.
 
 ```ts
+export async function listAttachmentsToDownload(
+  db: Db,
+  messageId: string,
+  maxAttempts: number,
+): Promise<{ externalId: string }[]> {
+  return db
+    .select({ externalId: attachments.externalId })
+    .from(attachments)
+    .where(
+      and(
+        eq(attachments.messageId, messageId),
+        ne(attachments.downloadStatus, 'ok'),
+        lt(attachments.downloadAttempts, maxAttempts),
+      ),
+    )
+}
+
 export async function markAttachmentDownloaded(
   db: Db,
   messageId: string,
@@ -3569,18 +3836,19 @@ export async function markAttachmentFailed(
 }
 ```
 
-- [ ] **Step 4: Implementar la descarga**
+- [ ] **Step 5: Implementar la descarga**
 
 ```ts
 // src/capture/media.ts
-import type { Db } from '../store/client.ts'
+import type { Logger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
-import type { InboundMessage } from '../domain/types.ts'
+import type { DownloadedMedia, InboundMessage } from '../domain/types.ts'
+import type { Db } from '../store/client.ts'
 import {
+  listAttachmentsToDownload,
   markAttachmentDownloaded,
   markAttachmentFailed,
 } from '../store/repositories/attachments.ts'
-import type { Logger } from '../domain/logger.ts'
 
 export interface MediaDeps {
   db: Db
@@ -3588,62 +3856,82 @@ export interface MediaDeps {
   log?: Logger
 }
 
-export async function downloadPendingAttachments(
-  deps: MediaDeps,
-  message: InboundMessage,
-  messageId: string,
-): Promise<void> {
-  for (const attachment of message.attachments) {
+/**
+ * El medio de WhatsApp expira; el tope evita reintentos perpetuos
+ * durante las reentregas de mensajes históricos.
+ */
+export const MAX_DOWNLOAD_ATTEMPTS = 3
+
+export function createMediaDownloader(deps: MediaDeps) {
+  const inFlight = new Map<string, Promise<void>>()
+
+  async function downloadOne(
+    message: InboundMessage,
+    messageId: string,
+    externalId: string,
+  ): Promise<void> {
+    const eligible = await listAttachmentsToDownload(deps.db, messageId, MAX_DOWNLOAD_ATTEMPTS)
+    if (!eligible.some((attachment) => attachment.externalId === externalId)) return
+
+    let media: DownloadedMedia
     try {
-      const media = await deps.provider.downloadAttachment(message, attachment.externalId)
-      await markAttachmentDownloaded(
-        deps.db,
-        messageId,
-        attachment.externalId,
-        media.localPath,
-        media.sizeBytes,
-      )
+      media = await deps.provider.downloadAttachment(message, externalId)
     } catch (error) {
-      const detalle = error instanceof Error ? error.message : String(error)
-      await markAttachmentFailed(deps.db, messageId, attachment.externalId, detalle)
-      deps.log?.warn('no se pudo descargar un adjunto', {
-        externalId: attachment.externalId,
-        error: detalle,
-      })
+      const detail = error instanceof Error ? error.message : String(error)
+      await markAttachmentFailed(deps.db, messageId, externalId, detail)
+      deps.log?.warn('no se pudo descargar un adjunto', { externalId, error: detail })
+      return
     }
+    await markAttachmentDownloaded(deps.db, messageId, externalId, media.localPath, media.sizeBytes)
+  }
+
+  function downloadSingleFlight(
+    message: InboundMessage,
+    messageId: string,
+    externalId: string,
+  ): Promise<void> {
+    const key = `${messageId}\0${externalId}`
+    const existing = inFlight.get(key)
+    if (existing) return existing
+
+    const operation = downloadOne(message, messageId, externalId).finally(() => {
+      if (inFlight.get(key) === operation) inFlight.delete(key)
+    })
+    inFlight.set(key, operation)
+    return operation
+  }
+
+  return async function downloadPendingAttachments(
+    message: InboundMessage,
+    messageId: string,
+  ): Promise<void> {
+    await Promise.all(
+      message.attachments.map(({ externalId }) =>
+        downloadSingleFlight(message, messageId, externalId),
+      ),
+    )
   }
 }
 ```
 
-- [ ] **Step 5: Conectar la descarga al pipeline**
+- [ ] **Step 6: Conectar la descarga al pipeline**
 
-En `src/capture/ingest.ts`, agregar el import y reemplazar el bloque `if (inserted)` de la función `persist`:
+En `src/capture/ingest.ts`: agregar `provider: MessagingProvider` a `IngestDeps`, crear el descargador una sola vez con `createMediaDownloader` al construir el pipeline, y llamarlo en `persist` después de `insertAttachments`.
 
-```ts
-import { downloadPendingAttachments } from './media.ts'
-```
+La Tarea 8 dejó `insertAttachments` sin el bloque `if (inserted)`, así que no hay tal bloque para reemplazar. La descarga va al mismo nivel, también sin condicionar: quién decide es `listAttachmentsToDownload`.
 
-```ts
-    if (inserted) {
-      await insertAttachments(deps.db, id, message.attachments)
-      await downloadPendingAttachments(
-        { db: deps.db, provider: deps.provider, log },
-        message,
-        id,
-      )
-    }
-```
+Los tests de `tests/capture/ingest.test.ts` construyen el pipeline sin `provider`; hay que pasárselo ahora que es requerido.
 
-- [ ] **Step 6: Correr los tests y verificar que pasan**
+- [ ] **Step 7: Correr los tests y verificar que pasan**
 
 Run: `bun test tests/capture/`
-Expected: PASS, todos los tests de captura incluidos los dos nuevos.
+Expected: PASS, todos los tests de captura incluidos los cinco nuevos.
 
-- [ ] **Step 7: Verificar tipos y commitear**
+- [ ] **Step 8: Verificar tipos y commitear**
 
 ```bash
 bun run typecheck
-git add src/capture src/store/repositories/attachments.ts tests/capture/media.test.ts
+git add src/capture src/store/repositories/attachments.ts src/providers/fake/index.ts tests/capture
 git commit -m "feat: descarga de adjuntos resiliente a fallos"
 ```
 
