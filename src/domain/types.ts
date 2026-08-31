@@ -10,6 +10,9 @@ export type CaptureMode = 'all' | 'whitelist' | 'blacklist'
 /** Estado de la descarga de los bytes de un adjunto. */
 export type DownloadStatus = 'pending' | 'ok' | 'failed'
 
+/** Status of an outbound queue row. */
+export type OutboundStatus = 'pending' | 'sending' | 'sent' | 'failed'
+
 export interface ConversationRef {
   provider: ProviderId
   externalId: string

@@ -18,6 +18,7 @@ import type {
   CaptureMode,
   ConversationKind,
   DownloadStatus,
+  OutboundStatus,
   ProviderId,
 } from '../domain/types.ts'
 
@@ -166,4 +167,76 @@ export const captureRules = pgTable(
     conversationExternalId: text('conversation_external_id').notNull(),
   },
   (t) => [uniqueIndex('capture_rules_provider_conversation_idx').on(t.provider, t.conversationExternalId)],
+)
+
+/**
+ * Outbound replies to send. The dispatcher claims `pending` rows whose
+ * `next_attempt_at` is due, marks them `sending`, then `sent`, or returns
+ * them to `pending` with backoff. `failed` is for non-retryable errors
+ * (destination outside control).
+ */
+export const outboundMessages = pgTable(
+  'outbound_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    provider: text('provider').$type<ProviderId>().notNull(),
+    conversationExternalId: text('conversation_external_id').notNull(),
+    text: text('text').notNull(),
+    /**
+     * Used as `messageId` in Baileys. A retry with the same key produces the
+     * same ID and WhatsApp drops it as a duplicate.
+     */
+    idempotencyKey: text('idempotency_key').notNull(),
+    status: text('status').$type<OutboundStatus>().notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    sentExternalId: text('sent_external_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('outbound_messages_idempotency_key_idx').on(t.idempotencyKey),
+    index('outbound_messages_due_idx').on(t.status, t.nextAttemptAt),
+  ],
+)
+
+/**
+ * IDs of messages the bot sent. The classifier checks these so it does not
+ * treat the bot's own reply as a user request.
+ */
+export const botMessages = pgTable(
+  'bot_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    provider: text('provider').$type<ProviderId>().notNull(),
+    /** Native id of the sent message. On WhatsApp this is the Baileys ID. */
+    externalId: text('external_id').notNull(),
+    outboundId: uuid('outbound_id').references(() => outboundMessages.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('bot_messages_provider_external_id_idx').on(t.provider, t.externalId)],
+)
+
+/**
+ * Pending request while the bot asked a follow-up. One active row per control
+ * conversation: a new request replaces the previous one.
+ */
+export const pendingClarifications = pgTable(
+  'pending_clarifications',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    provider: text('provider').$type<ProviderId>().notNull(),
+    conversationExternalId: text('conversation_external_id').notNull(),
+    originalText: text('original_text').notNull(),
+    question: text('question').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('pending_clarifications_provider_conversation_idx').on(
+      t.provider,
+      t.conversationExternalId,
+    ),
+  ],
 )

@@ -2,8 +2,10 @@ import { createIngestPipeline } from './capture/ingest.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
 import { loadConfig } from './config/index.ts'
+import { createControlLoop } from './control/loop.ts'
 import { describeError } from './domain/logger.ts'
 import { createLogger } from './logger.ts'
+import { createDispatcher } from './outbox/dispatcher.ts'
 import { createProvider } from './providers/registry.ts'
 import { createShutdown } from './shutdown.ts'
 import { createDb } from './store/client.ts'
@@ -108,7 +110,36 @@ const pipeline = createIngestPipeline({
   log,
 })
 
-provider.onMessage(pipeline.handle)
+const controlConfig = {
+  CONTROL_PROVIDER: config.CONTROL_PROVIDER,
+  CONTROL_CONVERSATION_ID: config.CONTROL_CONVERSATION_ID,
+}
+
+let control: ReturnType<typeof createControlLoop> | null = null
+let stopDispatch: (() => void) | null = null
+
+if (config.CONTROL_CONVERSATION_ID) {
+  control = createControlLoop({ db, config: controlConfig, log })
+  const dispatcher = createDispatcher({ db, provider, config: controlConfig, log })
+  stopDispatch = dispatcher.start(1_000)
+} else {
+  log.info('control disabled: CONTROL_CONVERSATION_ID is missing')
+}
+
+provider.onMessage(async (message) => {
+  try {
+    await pipeline.handle(message)
+  } catch (error) {
+    log.error('ingest crashed', { error: describeError(error) })
+  }
+  if (control) {
+    try {
+      await control.handle(message)
+    } catch (error) {
+      log.warn('control crashed', { error: describeError(error) })
+    }
+  }
+})
 
 provider.onConversationMeta?.(async (conversation) => {
   try {
@@ -135,8 +166,12 @@ const shutdown = createShutdown({
   pipeline,
   provider,
   closeDb: close,
-  stopRetries: () => clearInterval(retryTimer),
+  stopRetries: () => {
+    clearInterval(retryTimer)
+    stopDispatch?.()
+  },
   log,
+  timeoutMs: config.SHUTDOWN_TIMEOUT_MS,
 })
 
 /**

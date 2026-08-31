@@ -25,6 +25,10 @@ interface EnvironmentOptions {
   closeDbError?: Error
   /** Breaks the flush notice, which runs after the loss is already measured. */
   logError?: Error
+  /** Hard deadline passed to `createShutdown`. */
+  timeoutMs?: number
+  /** If true, `flushBuffer` never resolves (hangs until the timeout wins). */
+  hangFlush?: boolean
 }
 
 interface Line {
@@ -55,6 +59,7 @@ function createEnvironment(options: EnvironmentOptions = {}) {
     pipeline: {
       flushBuffer: async () => {
         order.push('flush')
+        if (options.hangFlush) return new Promise(() => {})
         if (options.flushError) throw options.flushError
         const persisted = Math.max(0, pending - (options.unrecoverable ?? 0))
         pending -= persisted
@@ -79,6 +84,7 @@ function createEnvironment(options: EnvironmentOptions = {}) {
     },
     stopRetries: () => order.push('stopRetries'),
     log,
+    timeoutMs: options.timeoutMs,
   })
 
   return {
@@ -230,4 +236,14 @@ test('a circular cause does not erase the lost message count', async () => {
   expect(await environment.shutdown.shutDown()).toBe(4)
 
   expect(environment.order).toContain('closeDb')
+})
+
+test('a hung flush still exits when the timeout wins', async () => {
+  const environment = createEnvironment({ pending: 3, hangFlush: true, timeoutMs: 50 })
+
+  expect(await environment.shutdown.shutDown()).toBe(3)
+
+  expect(environment.errors.some((line) => line.message === 'shutdown: timed out')).toBe(true)
+  expect(environment.errors.find((line) => line.message === 'shutdown: timed out')?.meta?.lost)
+    .toBe(3)
 })
