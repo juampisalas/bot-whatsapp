@@ -1,4 +1,5 @@
-import { createLlm } from './agent/llm/registry.ts'
+import { createEmbedder, createLlm } from './agent/llm/registry.ts'
+import { createMediaModel } from './agent/media/model.ts'
 import { createIngestPipeline } from './capture/ingest.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
@@ -120,7 +121,15 @@ let control: ReturnType<typeof createControlLoop> | null = null
 let stopDispatch: (() => void) | null = null
 
 if (config.CONTROL_CONVERSATION_ID) {
-  control = createControlLoop({ db, config: controlConfig, log, llm: createLlm(config) })
+  control = createControlLoop({
+    db,
+    config: controlConfig,
+    log,
+    llm: createLlm(config),
+    embedder: createEmbedder(config),
+    media: createMediaModel(config, log),
+    provider,
+  })
   const dispatcher = createDispatcher({ db, provider, config: controlConfig, log })
   stopDispatch = dispatcher.start(1_000)
 } else {

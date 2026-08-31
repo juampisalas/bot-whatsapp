@@ -9,7 +9,7 @@ export interface Embedder {
 }
 
 /**
- * Thin AI SDK adapter. Task 7 wires this into the registry with a real model.
+ * Thin AI SDK adapter around `embedMany`.
  */
 export function createSdkEmbedder(modelId: string, model: EmbeddingModel): Embedder {
   return {

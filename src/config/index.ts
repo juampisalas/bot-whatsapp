@@ -17,6 +17,7 @@ const schema = z.object({
   LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic', 'deepseek']).default('ollama'),
   LLM_MODEL: z.string().min(1).default('qwen3.6:35b-a3b'),
   LLM_BASE_URL: z.string().min(1).default('http://127.0.0.1:11434'),
+  EMBEDDING_MODEL: z.string().min(1).default('embeddinggemma:300m'),
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   DEEPSEEK_API_KEY: z.string().optional(),
