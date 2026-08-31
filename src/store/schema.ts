@@ -240,3 +240,49 @@ export const pendingClarifications = pgTable(
     ),
   ],
 )
+
+/**
+ * Global summary preferences. Singleton row (id must be 1), same pattern as
+ * `capture_policy`. Missing row falls back to `DEFAULT_PREFERENCES` in code.
+ */
+export const preferences = pgTable(
+  'preferences',
+  {
+    id: integer('id').primaryKey().default(1),
+    language: text('language'),
+    length: text('length'),
+    format: text('format'),
+    tone: text('tone'),
+    timezone: text('timezone'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check('preferences_id_must_be_one', sql`${t.id} = 1`)],
+)
+
+/**
+ * Per-conversation summary preferences and optional spoken alias used to
+ * resolve a chat without calling the model.
+ */
+export const chatPreferences = pgTable(
+  'chat_preferences',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    language: text('language'),
+    length: text('length'),
+    format: text('format'),
+    tone: text('tone'),
+    timezone: text('timezone'),
+    focus: text('focus'),
+    ignoreKinds: jsonb('ignore_kinds').$type<string[]>().notNull().default([]),
+    /** Spoken name resolved deterministically, for example `la facu`. */
+    alias: text('alias'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('chat_preferences_conversation_id_idx').on(t.conversationId),
+    uniqueIndex('chat_preferences_alias_idx').on(sql`lower(${t.alias})`),
+  ],
+)

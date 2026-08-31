@@ -11,9 +11,11 @@ const TABLES = [
   'attachments',
   'messages',
   'participants',
+  'chat_preferences',
   'conversations',
   'capture_rules',
   'capture_policy',
+  'preferences',
 ] as const
 
 export function openTestDb() {
