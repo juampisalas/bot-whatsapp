@@ -7,9 +7,23 @@ import type {
   InboundMessage,
 } from '../../domain/types.ts'
 
-function conversationKind(remoteJid: string): ConversationKind {
+/**
+ * Null para lo que llega por el mismo evento que los mensajes pero no es una conversación.
+ *
+ * Los estados (`status@broadcast`) entran por `messages.upsert` como un chat más: con el
+ * history sync completo, esa única fila acumularía las historias de todos los contactos y
+ * el resumen se la ofrecería al usuario como si fuera alguien con quien habla.
+ *
+ * Las listas de difusión (`<id>@broadcast`) traen contenido real —son mensajes que mandó
+ * la cuenta vinculada—, pero tampoco son un chat: no hay interlocutor y las respuestas
+ * vuelven como mensajes uno a uno, así que no hay diálogo que resumir. Se descartan a
+ * sabiendas de que se pierde esa copia; la conversación con cada destinatario sí se
+ * captura por su lado.
+ */
+function conversationKind(remoteJid: string): ConversationKind | null {
   if (remoteJid.endsWith('@g.us')) return 'group'
   if (remoteJid.endsWith('@newsletter')) return 'channel'
+  if (remoteJid.endsWith('@broadcast')) return null
   return 'dm'
 }
 
@@ -118,6 +132,9 @@ export function normalizeWAMessage(
   const externalId = waMessage.key?.id
   if (!remoteJid || !externalId) return null
 
+  const kind = conversationKind(remoteJid)
+  if (!kind) return null
+
   const timestampValue = waMessage.messageTimestamp
   if (timestampValue === null || timestampValue === undefined) return null
 
@@ -132,7 +149,6 @@ export function normalizeWAMessage(
   if (text === null && !media) return null
 
   const fromSelf = waMessage.key?.fromMe === true
-  const kind = conversationKind(remoteJid)
   const senderJid = fromSelf
     ? selfJid
     : kind === 'group'

@@ -292,6 +292,26 @@ test('disconnect espera el despacho que estaba en vuelo', async () => {
   expect(desconectado).toBe(true)
 })
 
+test('normaliza el sufijo de dispositivo del JID propio', async () => {
+  const socket = new TestSocket(0, '5491100000000:12@s.whatsapp.net')
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    socketFactory: () => socket.value,
+  })
+
+  const remitentes: (string | undefined)[] = []
+  adapter.onMessage(async (message) => {
+    remitentes.push(message.sender?.externalId)
+  })
+  await adapter.connect()
+  socket.emitOpen()
+  socket.emitUpsert([waMessageDePrueba('PROPIO', true)])
+  await adapter.disconnect()
+
+  expect(remitentes).toEqual(['5491100000000@s.whatsapp.net'])
+})
+
 test('un logout avisa por el canal de fallo terminal', async () => {
   const socket = new TestSocket()
   const adapter = new WhatsAppProvider({

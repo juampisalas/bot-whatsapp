@@ -4,6 +4,7 @@ import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
+  jidNormalizedUser,
   useMultiFileAuthState,
   type WAMessage,
   type WASocket,
@@ -257,8 +258,14 @@ export class WhatsAppProvider implements MessagingProvider {
 
   private async dispatch(waMessages: readonly WAMessage[], socket: WASocket): Promise<void> {
     const handler = this.handler
-    const selfJid = socket.user?.id
-    if (!handler || !selfJid) return
+    const propio = socket.user?.id
+    if (!handler || !propio) return
+
+    // Baileys reporta el id propio con el dispositivo que salió del pair-success
+    // (`<numero>:<device>@s.whatsapp.net`). Sin sacárselo, los mensajes propios quedan bajo
+    // un participante que no es el JID con el que te ven los demás, y cada revinculación
+    // estrena fila en `participants`.
+    const selfJid = jidNormalizedUser(propio)
 
     for (const raw of waMessages) {
       const normalized = normalizeWAMessage(raw, selfJid)

@@ -122,6 +122,28 @@ test('toma el caption de una imagen como texto', () => {
   expect(result?.attachments[0]?.kind).toBe('image')
 })
 
+test('descarta los estados, que llegan como un chat más', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      key: { remoteJid: 'status@broadcast', id: 'ESTADO-1', fromMe: false },
+    }),
+    SELF,
+  )
+
+  expect(result).toBeNull()
+})
+
+test('descarta las listas de difusión', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      key: { remoteJid: '1234567890@broadcast', id: 'DIFUSION-1', fromMe: true },
+    }),
+    SELF,
+  )
+
+  expect(result).toBeNull()
+})
+
 test('devuelve null si falta la clave o el id', () => {
   expect(
     normalizeWAMessage(waMessage({ key: { remoteJid: null, id: 'HAS-ID' } }), SELF),
