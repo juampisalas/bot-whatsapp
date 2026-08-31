@@ -135,6 +135,27 @@ export const attachments = pgTable(
 )
 
 /**
+ * Cached transcripts and image descriptions for attachments. Keyed by
+ * attachment, derivation kind, and model so a model change does not reuse
+ * stale text.
+ */
+export const attachmentDerivations = pgTable(
+  'attachment_derivations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    attachmentId: uuid('attachment_id')
+      .notNull()
+      .references(() => attachments.id, { onDelete: 'cascade' }),
+    /** `transcript` for audio; `description` for image. */
+    kind: text('kind').$type<'transcript' | 'description'>().notNull(),
+    model: text('model').notNull(),
+    text: text('text').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('attachment_derivations_unique_idx').on(t.attachmentId, t.kind, t.model)],
+)
+
+/**
  * Política de captura activa. Es una tabla de una sola fila, y hacen falta
  * las dos restricciones juntas para garantizarlo: el check limita `id` al
  * valor 1 y la clave primaria impide que ese valor se repita. Un `default(1)`

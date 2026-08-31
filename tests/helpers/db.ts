@@ -9,6 +9,7 @@ const TABLES = [
   'bot_messages',
   'outbound_messages',
   'chunk_summaries',
+  'attachment_derivations',
   'attachments',
   'messages',
   'participants',
