@@ -1,3 +1,4 @@
+import { createLlm } from './agent/llm/registry.ts'
 import { createIngestPipeline } from './capture/ingest.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
@@ -119,7 +120,7 @@ let control: ReturnType<typeof createControlLoop> | null = null
 let stopDispatch: (() => void) | null = null
 
 if (config.CONTROL_CONVERSATION_ID) {
-  control = createControlLoop({ db, config: controlConfig, log })
+  control = createControlLoop({ db, config: controlConfig, log, llm: createLlm(config) })
   const dispatcher = createDispatcher({ db, provider, config: controlConfig, log })
   stopDispatch = dispatcher.start(1_000)
 } else {
