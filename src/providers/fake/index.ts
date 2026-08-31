@@ -20,13 +20,19 @@ export interface DownloadRecord {
   attachmentExternalId: string
 }
 
+export interface DownloadBarrier {
+  entered: Promise<void>
+  release(): void
+}
+
 export class FakeProvider implements MessagingProvider {
   readonly id: ProviderId = 'fake'
 
   private handler: InboundHandler | null = null
   private connected = false
   private nextSendError: Error | null = null
-  private nextDownloadError: Error | null = null
+  private readonly downloadErrors: Error[] = []
+  private downloadBarrier: { wait: Promise<void>; signalEntered: () => void } | null = null
   private readonly sentRecords: SentRecord[] = []
   private readonly downloadRecords: DownloadRecord[] = []
   private readonly conversations: ConversationSummary[] = []
@@ -67,7 +73,27 @@ export class FakeProvider implements MessagingProvider {
   }
 
   failNextDownload(error: Error): void {
-    this.nextDownloadError = error
+    this.downloadErrors.push(error)
+  }
+
+  // Solo para tests: mantiene descargas superpuestas sin depender de demoras del scheduler.
+  blockDownloads(): DownloadBarrier {
+    let signalEntered = (): void => {}
+    let releaseWait = (): void => {}
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve
+    })
+    const wait = new Promise<void>((resolve) => {
+      releaseWait = resolve
+    })
+    this.downloadBarrier = { wait, signalEntered }
+    return {
+      entered,
+      release: () => {
+        this.downloadBarrier = null
+        releaseWait()
+      },
+    }
   }
 
   seedConversations(items: ConversationSummary[]): void {
@@ -93,9 +119,11 @@ export class FakeProvider implements MessagingProvider {
     attachmentExternalId: string,
   ): Promise<DownloadedMedia> {
     this.downloadRecords.push({ messageExternalId: message.externalId, attachmentExternalId })
-    if (this.nextDownloadError) {
-      const error = this.nextDownloadError
-      this.nextDownloadError = null
+    const barrier = this.downloadBarrier
+    barrier?.signalEntered()
+    await barrier?.wait
+    const error = this.downloadErrors.shift()
+    if (error) {
       throw error
     }
     return { localPath: `/tmp/fake/${attachmentExternalId}`, sizeBytes: 4096 }

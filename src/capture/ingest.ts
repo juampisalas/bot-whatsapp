@@ -10,7 +10,7 @@ import {
 } from '../store/repositories/conversations.ts'
 import { insertMessage } from '../store/repositories/messages.ts'
 import { BoundedBuffer } from './buffer.ts'
-import { downloadPendingAttachments } from './media.ts'
+import { createMediaDownloader } from './media.ts'
 import { shouldCapture, type CapturePolicy } from './policy.ts'
 
 export interface IngestDeps {
@@ -24,6 +24,11 @@ export interface IngestDeps {
 export function createIngestPipeline(deps: IngestDeps) {
   const log = deps.log ?? silentLogger
   const buffer = new BoundedBuffer<InboundMessage>(deps.bufferMax)
+  const downloadPendingAttachments = createMediaDownloader({
+    db: deps.db,
+    provider: deps.provider,
+    log,
+  })
 
   async function persist(message: InboundMessage): Promise<void> {
     const conversationId = await upsertConversation(deps.db, {
@@ -57,7 +62,7 @@ export function createIngestPipeline(deps: IngestDeps) {
 
     // La escritura idempotente incondicional repara metadatos faltantes tras un commit parcial o una reentrega.
     await insertAttachments(deps.db, id, message.attachments)
-    await downloadPendingAttachments({ db: deps.db, provider: deps.provider, log }, message, id)
+    await downloadPendingAttachments(message, id)
   }
 
   async function handle(message: InboundMessage): Promise<void> {
