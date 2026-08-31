@@ -1,5 +1,6 @@
 import type { Logger } from '../domain/logger.ts'
 import { silentLogger } from '../domain/logger.ts'
+import type { MessagingProvider } from '../domain/provider.ts'
 import type { InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
 import { insertAttachments } from '../store/repositories/attachments.ts'
@@ -9,10 +10,12 @@ import {
 } from '../store/repositories/conversations.ts'
 import { insertMessage } from '../store/repositories/messages.ts'
 import { BoundedBuffer } from './buffer.ts'
+import { downloadPendingAttachments } from './media.ts'
 import { shouldCapture, type CapturePolicy } from './policy.ts'
 
 export interface IngestDeps {
   db: Db
+  provider: MessagingProvider
   policy: CapturePolicy
   bufferMax: number
   log?: Logger
@@ -54,6 +57,7 @@ export function createIngestPipeline(deps: IngestDeps) {
 
     // La escritura idempotente incondicional repara metadatos faltantes tras un commit parcial o una reentrega.
     await insertAttachments(deps.db, id, message.attachments)
+    await downloadPendingAttachments({ db: deps.db, provider: deps.provider, log }, message, id)
   }
 
   async function handle(message: InboundMessage): Promise<void> {

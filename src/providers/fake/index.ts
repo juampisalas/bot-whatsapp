@@ -15,17 +15,28 @@ export interface SentRecord {
   idempotencyKey: string
 }
 
+export interface DownloadRecord {
+  messageExternalId: string
+  attachmentExternalId: string
+}
+
 export class FakeProvider implements MessagingProvider {
   readonly id: ProviderId = 'fake'
 
   private handler: InboundHandler | null = null
   private connected = false
   private nextSendError: Error | null = null
+  private nextDownloadError: Error | null = null
   private readonly sentRecords: SentRecord[] = []
+  private readonly downloadRecords: DownloadRecord[] = []
   private readonly conversations: ConversationSummary[] = []
 
   get sent(): readonly SentRecord[] {
     return this.sentRecords
+  }
+
+  get downloads(): readonly DownloadRecord[] {
+    return this.downloadRecords
   }
 
   async connect(): Promise<void> {
@@ -55,6 +66,10 @@ export class FakeProvider implements MessagingProvider {
     this.nextSendError = error
   }
 
+  failNextDownload(error: Error): void {
+    this.nextDownloadError = error
+  }
+
   seedConversations(items: ConversationSummary[]): void {
     this.conversations.splice(0, this.conversations.length, ...items)
   }
@@ -74,10 +89,16 @@ export class FakeProvider implements MessagingProvider {
   }
 
   async downloadAttachment(
-    _message: InboundMessage,
+    message: InboundMessage,
     attachmentExternalId: string,
   ): Promise<DownloadedMedia> {
-    return { localPath: `/tmp/fake/${attachmentExternalId}`, sizeBytes: 0 }
+    this.downloadRecords.push({ messageExternalId: message.externalId, attachmentExternalId })
+    if (this.nextDownloadError) {
+      const error = this.nextDownloadError
+      this.nextDownloadError = null
+      throw error
+    }
+    return { localPath: `/tmp/fake/${attachmentExternalId}`, sizeBytes: 4096 }
   }
 
   async listConversations(): Promise<ConversationSummary[]> {

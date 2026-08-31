@@ -113,9 +113,10 @@ async function installInterleavingFailure(): Promise<void> {
   `
 }
 
-function createPipeline(log?: Logger, bufferMax = 10) {
+function createPipeline(provider: FakeProvider, log?: Logger, bufferMax = 10) {
   return createIngestPipeline({
     db: handle.db,
+    provider,
     policy: { mode: 'all', rules: new Set() },
     bufferMax,
     log,
@@ -141,7 +142,7 @@ afterAll(async () => {
 
 test('persiste un mensaje entrante de punta a punta', async () => {
   const provider = new FakeProvider()
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(provider)
   provider.onMessage(pipeline.handle)
   await provider.connect()
 
@@ -159,6 +160,7 @@ test('no persiste conversaciones excluidas por la política', async () => {
   const provider = new FakeProvider()
   const pipeline = createIngestPipeline({
     db: handle.db,
+    provider,
     policy: { mode: 'blacklist', rules: new Set(['c1']) },
     bufferMax: 10,
   })
@@ -172,7 +174,7 @@ test('no persiste conversaciones excluidas por la política', async () => {
 
 test('reentregar el mismo mensaje no lo duplica', async () => {
   const provider = new FakeProvider()
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(provider)
   provider.onMessage(pipeline.handle)
   await provider.connect()
 
@@ -182,9 +184,9 @@ test('reentregar el mismo mensaje no lo duplica', async () => {
   expect(await handle.db.select({ id: messages.id }).from(messages)).toHaveLength(1)
 })
 
-test('registra los adjuntos con estado pendiente', async () => {
+test('registra y descarga los adjuntos', async () => {
   const provider = new FakeProvider()
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(provider)
   provider.onMessage(pipeline.handle)
   await provider.connect()
 
@@ -206,7 +208,7 @@ test('registra los adjuntos con estado pendiente', async () => {
   expect(rows).toHaveLength(1)
   expect(rows[0]?.kind).toBe('audio')
   expect(rows[0]?.durationMs).toBe(45000)
-  expect(rows[0]?.downloadStatus).toBe('pending')
+  expect(rows[0]?.downloadStatus).toBe('ok')
 })
 
 test('un fallo al persistir encola el mensaje y no rechaza', async () => {
@@ -216,7 +218,7 @@ test('un fallo al persistir encola el mensaje y no rechaza', async () => {
     warn: (message, meta) => warnings.push({ message, meta }),
     error: () => {},
   }
-  const pipeline = createPipeline(log)
+  const pipeline = createPipeline(new FakeProvider(), log)
   await installInsertFailure()
 
   try {
@@ -232,7 +234,7 @@ test('un fallo al persistir encola el mensaje y no rechaza', async () => {
 })
 
 test('flushBuffer persiste lo encolado cuando la base se recupera', async () => {
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(new FakeProvider())
   await installInsertFailure()
   try {
     await pipeline.handle(mensaje({ externalId: 'm-recovered' }))
@@ -246,7 +248,7 @@ test('flushBuffer persiste lo encolado cuando la base se recupera', async () => 
 })
 
 test('flushBuffer conserva el mensaje si el reintento también falla', async () => {
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(new FakeProvider())
   await installInsertFailure()
   try {
     await pipeline.handle(mensaje({ externalId: 'm-requeued' }))
@@ -262,7 +264,7 @@ test('flushBuffer conserva el mensaje si el reintento también falla', async () 
 })
 
 test('flushBuffer repara adjuntos que fallaron después de persistir el mensaje', async () => {
-  const pipeline = createPipeline()
+  const pipeline = createPipeline(new FakeProvider())
   const message = mensaje({
     externalId: 'm-attachment-recovery',
     attachments: [
@@ -293,7 +295,7 @@ test('flushBuffer descarta reintentos viejos antes que llegadas nuevas', async (
     warn: (message, meta) => warnings.push({ message, meta }),
     error: () => {},
   }
-  const pipeline = createPipeline(log, 2)
+  const pipeline = createPipeline(new FakeProvider(), log, 2)
   await installInterleavingFailure()
   await pipeline.handle(mensaje({ externalId: 'old-a' }))
   await pipeline.handle(mensaje({ externalId: 'old-b' }))
