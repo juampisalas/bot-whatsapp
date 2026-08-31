@@ -4318,9 +4318,9 @@ git commit -m "feat: punto de entrada de captura y listado de conversaciones"
 
 Este plan deja un capturador completo, con la salvedad de que la vinculación con un teléfono real nunca se probó (Tarea 12, Paso 11). Lo que resta, en orden, cada uno con su propio plan:
 
-1. **Cola de salida y bucle de control**: tablas `outbound_messages`, `bot_messages` y `pending_clarifications`, el despachador con reintentos y fijación de `messageId`, y el módulo de control que distingue tus mensajes de los del bot. Deja un bot que contesta en el grupo, todavía sin resumir.
-2. **Resúmenes**: registry de proveedores del AI SDK, intérprete de lenguaje natural con tool calling, renderizado de transcripciones con presupuesto de tokens, troceado por día en la zona horaria configurada, resumen jerárquico con caché invalidado por modelo y prompt, y las tablas de preferencias con su cascada y alias.
-3. **Media y búsqueda semántica**: enriquecimiento perezoso de audios e imágenes con caché en `attachment_derivations`, embeddings perezosos acotados por conversación y rango, e índice HNSW sobre la columna vectorial.
+1. **Cola de salida y bucle de control**: [2026-08-30-cola-y-control.md](2026-08-30-cola-y-control.md)
+2. **Resúmenes**: [2026-08-30-resumenes.md](2026-08-30-resumenes.md)
+3. **Media y búsqueda semántica**: [2026-08-30-media-y-busqueda.md](2026-08-30-media-y-busqueda.md)
 
 ### Pendientes que dejó la revisión final
 

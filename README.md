@@ -176,15 +176,11 @@ en pie sin capturar nada. Una caída de conexión común, en cambio, reconecta c
 
 ## Qué falta
 
-Además de la prueba de vinculación con un teléfono, en orden y cada uno con su propio plan en
-`docs/superpowers/plans/`:
+Además de la prueba de vinculación con un teléfono, en este orden:
 
-1. **Cola de salida y bucle de control**: el despachador con reintentos y el módulo que
-   distingue tus mensajes de los del bot. Deja un bot que contesta, todavía sin resumir.
-2. **Resúmenes**: proveedores de LLM vía AI SDK, interpretación del pedido en lenguaje
-   natural, troceado por día y resumen jerárquico con caché.
-3. **Media y búsqueda semántica**: transcripción de audios, descripción de imágenes y
-   embeddings con índice HNSW sobre la columna vectorial.
+1. [Cola de salida y bucle de control](docs/superpowers/plans/2026-08-30-cola-y-control.md)
+2. [Resúmenes](docs/superpowers/plans/2026-08-30-resumenes.md)
+3. [Media y búsqueda semántica](docs/superpowers/plans/2026-08-30-media-y-busqueda.md)
 
 ## Diseño
 

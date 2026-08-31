@@ -1,9 +1,13 @@
 # Bot de resúmenes de WhatsApp — Diseño
 
 Fecha: 2026-08-30
-Estado: aprobado. La fundación y la captura ya están implementadas, con su plan en
-`docs/superpowers/plans/2026-08-30-fundacion-y-captura.md`; el resto de las secciones
-describe lo que todavía no se escribió.
+Estado: aprobado. La fundación y la captura ya están implementadas
+(`docs/superpowers/plans/2026-08-30-fundacion-y-captura.md`). Los planes de lo que
+falta están escritos:
+
+1. `docs/superpowers/plans/2026-08-30-cola-y-control.md`
+2. `docs/superpowers/plans/2026-08-30-resumenes.md`
+3. `docs/superpowers/plans/2026-08-30-media-y-busqueda.md`
 
 ## 1. Objetivo
 
@@ -375,8 +379,13 @@ conversación que no sea la de control.
 
 ## 15. Preparación previa a la implementación
 
-1. Instalar Bun, que no está presente en la máquina
-2. Instalar Ollama y descargar el modelo de generación y el de embeddings
-3. Levantar Postgres con pgvector vía Docker Compose
-4. Configurar Context7 como MCP para tener documentación actualizada de las
-   librerías durante el desarrollo
+Hecho en esta máquina:
+
+1. Bun 1.4.0
+2. Ollama 0.33.0 sirviendo `qwen3.6:35b-a3b` y `embeddinggemma:300m`
+3. Postgres 18 con pgvector en el puerto 5433 (`docker compose ps` healthy)
+4. Context7 autenticado como MCP (`user-context7`)
+
+La tabla `sync_state` del modelo de datos no tiene plan: no hay lector, y
+crearla ahora sería esquema muerto. Se agrega cuando alguien mida el history
+sync.
