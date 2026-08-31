@@ -1,7 +1,9 @@
 # Bot de resúmenes de WhatsApp — Diseño
 
 Fecha: 2026-08-30
-Estado: aprobado, pendiente de plan de implementación
+Estado: aprobado. La fundación y la captura ya están implementadas, con su plan en
+`docs/superpowers/plans/2026-08-30-fundacion-y-captura.md`; el resto de las secciones
+describe lo que todavía no se escribió.
 
 ## 1. Objetivo
 
@@ -189,6 +191,11 @@ política de captura, persistencia del mensaje, descarga de los bytes de los
 adjuntos. Cero llamadas a un LLM en todo el camino: si el modelo local está
 caído o un proveedor rechaza la petición, no se pierde ningún mensaje.
 
+La normalización además descarta lo que llega por el mismo evento que los
+mensajes pero no es una conversación: los estados (`status@broadcast`), que si
+no acumularían las historias de todos los contactos en un chat falso, y las
+listas de difusión, que no tienen interlocutor ni diálogo que resumir.
+
 ### Consulta (bajo demanda)
 
 1. Llega un mensaje a la conversación de control
@@ -228,9 +235,11 @@ veces.
 ## 7. Conversación de control
 
 Se identifica por proveedor más identificador de conversación, tomados del
-entorno. Si el identificador no está seteado, en el primer arranque el bot
-lista las conversaciones disponibles con sus IDs para que el usuario copie la
-que quiera.
+entorno. Para conseguir ese identificador hay un subcomando dedicado,
+`list-conversations`, que se vincula, imprime los grupos con sus IDs y sale. La
+idea original era listarlos automáticamente cuando el identificador estuviera
+vacío; se descartó al implementarla, porque hacía que arrancar el proceso
+significara dos cosas distintas según el valor de una variable.
 
 Distinguir los pedidos del usuario de las respuestas del propio bot es un
 problema real, porque en WhatsApp ambos salen de la misma cuenta y llegan
@@ -270,15 +279,18 @@ ambigüedad, se pregunta de vuelta.
 La regla que ordena todo: la ingesta nunca pierde un mensaje por una falla de
 una capa superior.
 
-- Falla la descarga de un adjunto: el mensaje se guarda igual, el adjunto queda
-  marcado como fallido y se reintenta cuando se lo necesite
+- Falla la descarga de un adjunto: el mensaje se guarda igual y el adjunto queda
+  marcado como fallido, con el motivo y la cuenta de intentos. El único
+  reintento que existe es el que dispara una reentrega del mensaje (ver abajo)
 - Falla el enriquecimiento de un adjunto: la transcripción se reemplaza por el
   marcador y el resumen sale igual. Un resumen parcial sirve más que ninguno
 - Falla el LLM: el error se reporta en la conversación de control, nunca queda
   en silencio
-- Se cierra la sesión desde el teléfono: se limpian las credenciales y se
-  muestra un QR nuevo, sin entrar en ciclo de reinicio
-- Se cae la conexión: reconexión con backoff exponencial
+- Se cierra la sesión desde el teléfono: es terminal. El adaptador avisa por su
+  canal de fallo terminal, el proceso se apaga ordenadamente y sale con 1 en vez
+  de reconectar. Volver exige borrar el directorio de credenciales a mano y
+  vincular de nuevo; nada se limpia solo, y no se muestra un QR nuevo
+- Se cae la conexión por cualquier otro motivo: reconexión con backoff exponencial
 - Descargas de adjuntos y lotes de embeddings con límite de concurrencia
 
 Punto débil aceptado: si Postgres está caído no hay dónde guardar, y WhatsApp no
@@ -286,6 +298,23 @@ reenvía lo ya entregado. La mitigación para la v1 es un buffer en memoria con
 capacidad máxima configurable, por defecto mil mensajes, que descarta los más
 antiguos al llenarse y registra en el log cuántos se perdieron. Se suma una
 política de reinicio en Docker Compose. No es infalible y se documenta como tal.
+
+### El reintento de adjuntos, en concreto
+
+Qué falta bajar lo decide la base: se descarga lo que no esté en `ok` y lleve
+menos de tres intentos. Eso hace la descarga idempotente frente al history sync,
+pero también significa que **nada mira los adjuntos fallidos por su cuenta**: el
+único disparador de un segundo intento es que WhatsApp vuelva a entregar el
+mensaje, que trae su carga viva. Si no lo reentrega, el adjunto se queda en
+`failed`.
+
+La columna `raw` no rescata ese caso, aunque parezca que debería. Verificado: los
+binarios de Baileys no sobreviven al viaje por jsonb —`mediaKey` y compañía
+vuelven como objetos comunes en vez de `Uint8Array`— y `downloadMediaMessage` no
+los acepta así. Codificarlos en base64 al persistir los haría recuperables, pero
+es una decisión abierta, con su costo de espacio y de migración: se resuelve en
+el plan de media y búsqueda semántica, junto con el resto del tratamiento de
+adjuntos. Hoy no funciona y el esquema lo dice.
 
 ## 11. Testing
 
