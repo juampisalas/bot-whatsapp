@@ -21,6 +21,7 @@ import type {
   ProviderId,
   SentMessage,
 } from '../../domain/types.ts'
+import { createBaileysLogger } from './baileys-logger.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
 export interface WhatsAppProviderOptions {
@@ -227,6 +228,7 @@ export class WhatsAppProvider implements MessagingProvider {
       auth: state,
       version,
       syncFullHistory: true,
+      logger: createBaileysLogger(this.log),
     })
     return { socket, saveCreds }
   }

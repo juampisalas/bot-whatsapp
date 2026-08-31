@@ -85,10 +85,13 @@ export const messages = pgTable(
     threadExternalId: text('thread_external_id'),
     replyToExternalId: text('reply_to_external_id'),
     /**
-     * Carga original del proveedor, sin tipar a propósito. Solo el adaptador
-     * que la escribió sabe interpretarla, y se guarda porque volver a
-     * descargar un adjunto que falló la necesita. No es una columna de
-     * extensión especulativa: tiene ese consumidor concreto.
+     * Carga original del proveedor, sin tipar a propósito: solo el adaptador que la
+     * escribió sabe interpretarla.
+     *
+     * No sirve para reintentar una descarga. Los binarios no sobreviven al viaje por
+     * jsonb: `mediaKey` vuelve como objeto común y no como `Uint8Array`, así que
+     * `downloadMediaMessage` no lo acepta. El único reintento que existe hoy es el que
+     * dispara una reentrega del mensaje, que trae su propia carga viva.
      */
     raw: jsonb('raw'),
     /** Null hasta que una búsqueda por tema fuerza a embeddear este mensaje. */
