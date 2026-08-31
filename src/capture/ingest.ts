@@ -1,5 +1,5 @@
 import type { Logger } from '../domain/logger.ts'
-import { silentLogger } from '../domain/logger.ts'
+import { describirError, silentLogger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
 import type { InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
@@ -76,7 +76,7 @@ export function createIngestPipeline(deps: IngestDeps) {
         externalId: message.externalId,
         enBuffer: buffer.size,
         descartados: buffer.dropped,
-        error: error instanceof Error ? error.message : String(error),
+        error: describirError(error),
       })
     }
   }

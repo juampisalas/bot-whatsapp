@@ -153,7 +153,7 @@ export class WhatsAppProvider implements MessagingProvider {
       if (!this.isCurrentSocket(socket, generation)) return
       void saveCreds().catch((error: unknown) => {
         this.log.error('no se pudieron guardar las credenciales de WhatsApp', {
-          error: error instanceof Error ? error.message : String(error),
+          error: describirError(error),
         })
       })
     })
@@ -275,7 +275,7 @@ export class WhatsAppProvider implements MessagingProvider {
       } catch (error) {
         this.log.error('el manejador falló con un mensaje entrante', {
           externalId: normalized.externalId,
-          error: error instanceof Error ? error.message : String(error),
+          error: describirError(error),
         })
       }
     }
@@ -340,7 +340,7 @@ export class WhatsAppProvider implements MessagingProvider {
       } catch (error) {
         if (this.state !== 'reconnecting') return
         this.log.error('falló la preparación de la conexión de WhatsApp', {
-          error: error instanceof Error ? error.message : String(error),
+          error: describirError(error),
         })
       }
     }
@@ -364,7 +364,7 @@ export class WhatsAppProvider implements MessagingProvider {
       await socket.end(undefined)
     } catch (error) {
       this.log.warn('falló el cierre del socket de WhatsApp', {
-        error: error instanceof Error ? error.message : String(error),
+        error: describirError(error),
       })
     }
   }

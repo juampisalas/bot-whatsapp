@@ -1,4 +1,4 @@
-import type { Logger } from '../domain/logger.ts'
+import { describirError, type Logger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
 import type { DownloadedMedia, InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
@@ -35,7 +35,9 @@ export function createMediaDownloader(deps: MediaDeps) {
     try {
       media = await deps.provider.downloadAttachment(message, externalId)
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
+      // El detalle se persiste en la fila del adjunto: es lo único que va a quedar para
+      // entender por qué no bajó, así que tiene que traer la causa envuelta.
+      const detail = describirError(error)
       await markAttachmentFailed(deps.db, messageId, externalId, detail)
       deps.log?.warn('no se pudo descargar un adjunto', { externalId, error: detail })
       return

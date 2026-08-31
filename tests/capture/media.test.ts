@@ -166,6 +166,21 @@ test('un fallo de descarga conserva el mensaje y registra el intento fallido', a
   ])
 })
 
+test('el error de descarga que se persiste conserva la causa envuelta', async () => {
+  const { provider } = setup()
+  provider.failNextDownload(
+    new Error('no se pudo bajar el medio', { cause: new Error('ECONNRESET') }),
+  )
+  await provider.connect()
+
+  await provider.inject(messageWithAttachment())
+
+  // Este texto queda guardado en la fila: si se pierde la causa, quien mire después no
+  // tiene con qué distinguir un medio vencido de la red caída.
+  const rows = await handle.db.select({ error: attachments.downloadError }).from(attachments)
+  expect(rows[0]?.error).toBe('no se pudo bajar el medio: ECONNRESET')
+})
+
 test('un fallo al registrar el éxito no agota el intento y permite recuperarlo', async () => {
   const { provider } = setup()
   const message = messageWithAttachment()

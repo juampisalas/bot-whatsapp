@@ -231,6 +231,9 @@ test('un fallo al persistir encola el mensaje y no rechaza', async () => {
   expect(warnings).toHaveLength(1)
   expect(warnings[0]?.message).toBe('no se pudo persistir, mensaje en buffer')
   expect(warnings[0]?.meta?.enBuffer).toBe(1)
+  // Este es el aviso que se ve cuando la base se cae, y drizzle esconde el motivo real
+  // adentro: sin recorrer la cadena de causas sale un "Failed query" que no explica nada.
+  expect(warnings[0]?.meta?.error).toContain('forced ingest message failure')
   // El apagado necesita saber cuántos mensajes se perderían si el vaciado final no alcanza.
   expect(pipeline.bufferSize).toBe(1)
 })
