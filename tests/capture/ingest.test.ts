@@ -265,6 +265,41 @@ test('flushBuffer conserva el mensaje si el reintento también falla', async () 
   expect(rows).toEqual([{ externalId: 'm-requeued' }])
 })
 
+test('dos flush concurrentes resuelven el mismo vaciado una sola vez', async () => {
+  const infos: Array<{ message: string; meta?: Record<string, unknown> }> = []
+  const log: Logger = {
+    info: (message, meta) => infos.push({ message, meta }),
+    warn: () => {},
+    error: () => {},
+  }
+  const pipeline = createPipeline(new FakeProvider(), log)
+  await installInsertFailure()
+  try {
+    await pipeline.handle(mensaje({ externalId: 'm-concurrente-a' }))
+    await pipeline.handle(mensaje({ externalId: 'm-concurrente-b' }))
+  } finally {
+    await removeInsertFailure()
+  }
+
+  // El apagado pide un vaciado mientras el reintento periódico está a mitad del suyo:
+  // si el segundo drenara el buffer ya vacío, reportaría cero pérdidas sobre mensajes
+  // que el primero todavía puede reencolar.
+  const [delReintento, delApagado] = await Promise.all([
+    pipeline.flushBuffer(),
+    pipeline.flushBuffer(),
+  ])
+
+  expect(delReintento).toBe(2)
+  expect(delApagado).toBe(2)
+  expect(pipeline.bufferSize).toBe(0)
+  expect(infos.filter((linea) => linea.message === 'buffer vaciado')).toHaveLength(1)
+  const rows = await handle.db
+    .select({ externalId: messages.externalId })
+    .from(messages)
+    .orderBy(messages.externalId)
+  expect(rows).toEqual([{ externalId: 'm-concurrente-a' }, { externalId: 'm-concurrente-b' }])
+})
+
 test('flushBuffer repara adjuntos que fallaron después de persistir el mensaje', async () => {
   const pipeline = createPipeline(new FakeProvider())
   const message = mensaje({

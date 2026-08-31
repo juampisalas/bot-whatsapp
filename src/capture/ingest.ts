@@ -81,8 +81,7 @@ export function createIngestPipeline(deps: IngestDeps) {
     }
   }
 
-  /** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */
-  async function flushBuffer(): Promise<number> {
+  async function vaciar(): Promise<number> {
     const pendientes = buffer.drain()
     const fallidos: InboundMessage[] = []
     let persistidos = 0
@@ -106,6 +105,20 @@ export function createIngestPipeline(deps: IngestDeps) {
     }
     if (persistidos > 0) log.info('buffer vaciado', { persistidos })
     return persistidos
+  }
+
+  // `vaciar` arranca drenando el buffer, así que dos corridas en paralelo se pisan: la
+  // segunda drena la nada y responde cero mientras la primera todavía puede reencolar.
+  // El apagado se apoya en ese número para decidir si hubo pérdida, así que en vez de
+  // correr en paralelo espera al vaciado en vuelo.
+  let enVuelo: Promise<number> | null = null
+
+  /** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */
+  function flushBuffer(): Promise<number> {
+    enVuelo ??= vaciar().finally(() => {
+      enVuelo = null
+    })
+    return enVuelo
   }
 
   return {

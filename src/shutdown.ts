@@ -1,4 +1,4 @@
-import type { Logger } from './domain/logger.ts'
+import { describirError, type Logger } from './domain/logger.ts'
 import type { MessagingProvider } from './domain/provider.ts'
 
 export interface ShutdownDeps {
@@ -14,8 +14,20 @@ export interface ShutdownDeps {
   log: Logger
 }
 
-function describir(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+export interface Shutdown {
+  /**
+   * Apaga una sola vez y devuelve cuántos mensajes quedaron sin persistir.
+   *
+   * Nunca rechaza: la invocan manejadores de señales, donde un rechazo sin capturar
+   * mata el proceso a mitad del apagado, y como la promesa queda cacheada ese rechazo
+   * se repetiría en cada señal posterior.
+   */
+  apagar(): Promise<number>
+  /**
+   * Hay un apagado en marcha o terminado. Quien esperaba al proveedor lo consulta para
+   * distinguir un fallo de conexión de la desconexión que pidió la señal.
+   */
+  readonly enCurso: boolean
 }
 
 /**
@@ -24,48 +36,69 @@ function describir(error: unknown): string {
  * El orden importa. Si desconectáramos antes de vaciar, un Ctrl-C entre dos
  * reintentos periódicos tiraría mensajes que la base ya podía aceptar, que es
  * justo lo que el buffer existe para evitar.
- *
- * La función devuelta nunca rechaza: la invocan manejadores de señales, donde
- * un rechazo sin capturar mata el proceso a mitad del apagado.
  */
-export function createShutdown(deps: ShutdownDeps): () => Promise<void> {
-  async function vaciar(): Promise<void> {
+export function createShutdown(deps: ShutdownDeps): Shutdown {
+  /** Último recurso: si el canal de avisos es lo que falla, el apagado igual sigue. */
+  function reportar(falla: string, error: unknown): void {
     try {
-      const persistidos = await deps.pipeline.flushBuffer()
-      deps.log.info('apagado: buffer vaciado', { persistidos })
+      deps.log.error(`apagado: ${falla}`, { error: describirError(error) })
+    } catch {
+      // Sin dónde avisar. Cortar el apagado acá cuesta más que perder el aviso.
+    }
+  }
+
+  /** Aísla un paso: ninguno puede saltearse los que siguen ni hacer rechazar el apagado. */
+  async function paso(falla: string, accion: () => void | Promise<void>): Promise<void> {
+    try {
+      await accion()
     } catch (error) {
+      reportar(falla, error)
+    }
+  }
+
+  /** Devuelve los mensajes que se pierden: los que sobreviven al último intento. */
+  async function vaciar(): Promise<number> {
+    let persistidos: number
+    try {
+      persistidos = await deps.pipeline.flushBuffer()
+    } catch (error) {
+      const perdidos = deps.pipeline.bufferSize
       deps.log.error('apagado: falló el vaciado del buffer', {
-        perdidos: deps.pipeline.bufferSize,
-        error: describir(error),
+        perdidos,
+        error: describirError(error),
       })
-      return
+      return perdidos
     }
 
+    deps.log.info('apagado: buffer vaciado', { persistidos })
+
     // `flushBuffer` no propaga el fallo por mensaje: reencola lo que no entró.
-    // Lo que sobrevive al último intento se pierde, y eso se dice en voz alta.
     const perdidos = deps.pipeline.bufferSize
     if (perdidos > 0) {
       deps.log.error('apagado: se pierden mensajes que no se pudieron persistir', { perdidos })
     }
+    return perdidos
   }
 
-  async function soltar(recurso: string, cerrar: () => Promise<void>): Promise<void> {
-    try {
-      await cerrar()
-    } catch (error) {
-      deps.log.error(`apagado: no se pudo cerrar ${recurso}`, { error: describir(error) })
-    }
+  async function correr(): Promise<number> {
+    let perdidos = 0
+    await paso('no se pudo cortar el reintento del buffer', () => deps.stopRetries())
+    await paso('quedó a medias el vaciado del buffer', async () => {
+      perdidos = await vaciar()
+    })
+    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
+    await paso('no se pudo cerrar la base', () => deps.closeDb())
+    await paso('no se pudo anunciar el final', () => deps.log.info('apagado completo'))
+    return perdidos
   }
 
-  async function apagar(): Promise<void> {
-    deps.stopRetries()
-    await vaciar()
-    await soltar('el proveedor', () => deps.provider.disconnect())
-    await soltar('la base', deps.closeDb)
-    deps.log.info('apagado completo')
-  }
+  let enCurso: Promise<number> | null = null
 
-  // Un Ctrl-C impaciente manda dos señales: la segunda espera el mismo apagado.
-  let enCurso: Promise<void> | null = null
-  return () => (enCurso ??= apagar())
+  return {
+    // Un Ctrl-C impaciente manda dos señales: la segunda espera el mismo apagado.
+    apagar: () => (enCurso ??= correr()),
+    get enCurso(): boolean {
+      return enCurso !== null
+    },
+  }
 }

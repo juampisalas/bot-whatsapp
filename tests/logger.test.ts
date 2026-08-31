@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { describirError } from '../src/domain/logger.ts'
 import { createLogger } from '../src/logger.ts'
 
 function capturarLineas(escribir: () => void): string[] {
@@ -50,4 +51,24 @@ test('omite los metadatos cuando no hay', () => {
   })
 
   expect(lineas[0]).toEndWith('sin metadatos')
+})
+
+test('describirError encadena la causa que el error de arriba no nombra', () => {
+  const causa = new Error('conexión rechazada')
+  const envoltorio = new Error('Failed query: select 1', { cause: causa })
+
+  expect(describirError(envoltorio)).toBe('Failed query: select 1: conexión rechazada')
+})
+
+test('describirError nombra por el código a la causa sin mensaje', () => {
+  // Los errores de red de node llegan con `message` vacío: sin el código no queda nada útil.
+  const causa = Object.assign(new Error(''), { code: 'ECONNREFUSED' })
+
+  expect(describirError(new Error('Failed query', { cause: causa }))).toBe(
+    'Failed query: ECONNREFUSED',
+  )
+})
+
+test('describirError no rompe con algo que no es un Error', () => {
+  expect(describirError('se cayó todo')).toBe('se cayó todo')
 })
