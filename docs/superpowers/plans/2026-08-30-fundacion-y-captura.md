@@ -191,6 +191,7 @@ const schema = z.object({
   CONTROL_CONVERSATION_ID: z.string().optional(),
   CAPTURE_BUFFER_MAX: z.coerce.number().int().positive().default(1000),
   TIMEZONE: z.string().min(1).default('America/Argentina/Buenos_Aires'),
+  // La Tarea 12 saca 'debug': el Logger nunca lo emitió, así que era un nivel que no hacía nada.
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
 
@@ -3940,64 +3941,54 @@ git commit -m "feat: descarga de adjuntos resiliente a fallos"
 ### Task 12: Punto de entrada y listado de conversaciones
 
 **Files:**
-- Create: `src/index.ts`
 - Create: `src/logger.ts`
-- Test: `tests/logger.test.ts`
+- Create: `src/cli.ts`
+- Create: `src/shutdown.ts`
+- Create: `src/index.ts`
+- Modify: `src/config/index.ts` (sacar `'debug'` de `LOG_LEVEL`)
+- Modify: `src/domain/logger.ts` (agregar `describirError`)
+- Modify: `src/capture/ingest.ts` (exponer `bufferSize`, coalescer `flushBuffer`)
+- Test: `tests/logger.test.ts`, `tests/cli.test.ts`, `tests/shutdown.test.ts`
 
 **Interfaces:**
 - Consumes: todo lo anterior
-- Produces: `createLogger(level: Config['LOG_LEVEL']): Logger` y un ejecutable que acepta el subcomando `list-conversations`.
+- Produces: `createLogger(level: Config['LOG_LEVEL']): Logger`, `parseCommand(argv: readonly string[]): Command`, `createShutdown(deps: ShutdownDeps): Shutdown`, y un ejecutable que acepta el subcomando `list-conversations`.
 
 El listado resuelve el problema práctico de conseguir el identificador del grupo de control, que hace falta antes de que el plan siguiente pueda responder algo.
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Sacar `'debug'` de `LOG_LEVEL`**
+
+`Config['LOG_LEVEL']` aceptaba `'debug'`, pero la interfaz `Logger` solo tiene `info`, `warn` y `error`. Con lo cual poner `LOG_LEVEL=debug` no habilitaba nada: se comportaba igual que `info`. Era una opción de configuración que mentía.
 
 ```ts
-// tests/logger.test.ts
-import { test, expect } from 'bun:test'
-import { createLogger } from '../src/logger.ts'
-
-test('filtra por nivel', () => {
-  const lineas: string[] = []
-  const original = console.log
-  console.log = (linea: string) => lineas.push(linea)
-  try {
-    const log = createLogger('warn')
-    log.info('esto no se ve')
-    log.warn('esto sí')
-  } finally {
-    console.log = original
-  }
-  expect(lineas).toHaveLength(1)
-  expect(lineas[0]).toContain('esto sí')
-})
-
-test('incluye los metadatos como JSON', () => {
-  const lineas: string[] = []
-  const original = console.log
-  console.log = (linea: string) => lineas.push(linea)
-  try {
-    createLogger('info').info('hola', { a: 1 })
-  } finally {
-    console.log = original
-  }
-  expect(lineas[0]).toContain('{"a":1}')
-})
+// src/config/index.ts
+  // Los niveles son los que el Logger sabe emitir. Uno nuevo entra junto con su emisor, no antes.
+  LOG_LEVEL: z.enum(['info', 'warn', 'error']).default('info'),
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+No es el mismo caso que `ProviderId`, que incluye canales sin implementar: ahí pedir uno no implementado falla con un error claro, mientras que acá pedir `debug` funcionaba y no hacía nada.
 
-Run: `bun test tests/logger.test.ts`
-Expected: FAIL, no resuelve `../src/logger.ts`.
+Tests agregados en `tests/config.test.ts`: el nivel por defecto es `info` y `'debug'` se rechaza.
 
-- [ ] **Step 3: Implementar el logger**
+- [x] **Step 2: Escribir los tests que fallan**
+
+`tests/logger.test.ts` con un helper `capturarLineas` que intercepta `console.log`: filtrado por nivel, `error` en el nivel más alto, metadatos como JSON y omisión del sufijo cuando no hay metadatos.
+
+`tests/cli.test.ts`: sin subcomando devuelve `run`, `list-conversations` se reconoce, y un subcomando desconocido falla con un mensaje que nombra los comandos válidos.
+
+- [x] **Step 3: Correr los tests y verificar que fallan**
+
+Run: `bun test tests/logger.test.ts tests/cli.test.ts`
+Expected: FAIL, no resuelven `../src/logger.ts` ni `../src/cli.ts`.
+
+- [x] **Step 4: Implementar el logger**
 
 ```ts
 // src/logger.ts
 import type { Config } from './config/index.ts'
 import type { Logger } from './domain/logger.ts'
 
-const orden = { debug: 10, info: 20, warn: 30, error: 40 } as const
+const orden = { info: 20, warn: 30, error: 40 } as const
 
 export function createLogger(level: Config['LOG_LEVEL']): Logger {
   const minimo = orden[level]
@@ -4014,73 +4005,262 @@ export function createLogger(level: Config['LOG_LEVEL']): Logger {
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
-
-Run: `bun test tests/logger.test.ts`
-Expected: PASS, 2 tests.
-
-- [ ] **Step 5: Implementar el punto de entrada**
+- [x] **Step 5: Implementar el parseo del subcomando**
 
 ```ts
-// src/index.ts
-import { loadConfig } from './config/index.ts'
-import { createLogger } from './logger.ts'
-import { createDb } from './store/client.ts'
-import { createProvider } from './providers/registry.ts'
-import { loadCapturePolicy } from './store/repositories/capture-policy.ts'
-import { createIngestPipeline } from './capture/ingest.ts'
+// src/cli.ts
+export type Command = 'run' | 'list-conversations'
 
-const config = loadConfig()
-const log = createLogger(config.LOG_LEVEL)
-const { db, close } = createDb(config.DATABASE_URL)
-const provider = createProvider(config.PROVIDER, config, log)
-
-const comando = process.argv[2] ?? 'run'
-
-if (comando === 'list-conversations') {
-  await provider.connect()
-  await provider.waitUntilReady()
-  for (const conversacion of await provider.listConversations()) {
-    console.log(`${conversacion.externalId}\t${conversacion.name ?? '(sin nombre)'}`)
-  }
-  await provider.disconnect()
-  await close()
-  process.exit(0)
+// Mapa en lugar de lista para que el guard y el mensaje de error salgan de la misma fuente.
+const COMANDOS: Record<Command, true> = {
+  run: true,
+  'list-conversations': true,
 }
 
-const policy = await loadCapturePolicy(db, provider.id)
-log.info('política de captura cargada', { modo: policy.mode, reglas: policy.rules.size })
-
-const pipeline = createIngestPipeline({
-  db,
-  policy,
-  provider,
-  bufferMax: config.CAPTURE_BUFFER_MAX,
-  log,
-})
-
-provider.onMessage(pipeline.handle)
-
-// Reintenta lo que quedó en el buffer cuando la base no respondía.
-const reintento = setInterval(() => {
-  void pipeline.flushBuffer()
-}, 30_000)
-
-const apagar = async (): Promise<void> => {
-  clearInterval(reintento)
-  await provider.disconnect()
-  await close()
-  process.exit(0)
+function esComando(valor: string): valor is Command {
+  return Object.hasOwn(COMANDOS, valor)
 }
 
-process.on('SIGINT', () => void apagar())
-process.on('SIGTERM', () => void apagar())
+/**
+ * Sin subcomando corre la captura. Cualquier token que no sea un comando
+ * conocido falla: si cayera en el camino por defecto, un `lst-conversations`
+ * con un dedazo arrancaría el bot en modo captura sin decir nada.
+ */
+export function parseCommand(argv: readonly string[]): Command {
+  const [subcomando] = argv
+  if (subcomando === undefined) return 'run'
+  if (esComando(subcomando)) return subcomando
 
-await provider.connect()
-log.info('capturando mensajes')
+  const validos = Object.keys(COMANDOS).join(', ')
+  throw new Error(`Subcomando desconocido: ${subcomando}. Comandos válidos: ${validos}`)
+}
 ```
 
-- [ ] **Step 6: Correr la suite completa y verificar tipos**
+- [x] **Step 6: Agregar `describirError` al puerto del logger**
+
+Descubierto al implementar el manejo de errores del entrypoint. Sin `try`, cuando la base no responde al arrancar, Bun imprime el stack trace **y la causa encadenada**, o sea el `ECONNREFUSED`. Al capturar el error y loguear solo `error.message` quedaba `no se pudo cargar la política de captura: "Failed query: select ..."`, que no le dice a nadie que la base está caída: drizzle envuelve el error de red y esconde la causa. Envolver el error mejoraba la prolijidad y empeoraba el diagnóstico.
+
+```ts
+// src/domain/logger.ts
+/**
+ * Arma la línea de `error` de un log sin stack trace.
+ *
+ * Encadena las causas porque quien envuelve suele no nombrarlas: drizzle reporta
+ * "Failed query" y deja el `ECONNREFUSED` adentro, que es lo único que le sirve a
+ * quien está mirando por qué no arrancó.
+ */
+export function describirError(error: unknown): string {
+  return describirCadena(error, new Set())
+}
+
+/**
+ * Corta si la cadena de causas se cierra en ciclo (`a.cause = b`, `b.cause = a`): sin eso
+ * la recursión desborda la pila justo cuando se está intentando reportar un fallo, y quien
+ * llama suele estar en un camino de error donde ya no queda dónde avisar.
+ */
+function describirCadena(error: unknown, vistos: Set<unknown>): string {
+  if (!(error instanceof Error)) return String(error)
+
+  const codigo = 'code' in error && typeof error.code === 'string' ? error.code : null
+  const propio = error.message || codigo || error.name
+  vistos.add(error)
+  return error.cause === undefined || vistos.has(error.cause)
+    ? propio
+    : `${propio}: ${describirCadena(error.cause, vistos)}`
+}
+```
+
+El respaldo por `code` no es decorativo: los errores de red de node llegan con `message` vacío, así que sin él la línea sale `{"error":""}` justo en el fallo de arranque más común. Va en `src/domain/logger.ts` y no en `src/logger.ts` porque `src/shutdown.ts` ya importa el puerto: ponerlo en la implementación concreta haría que el apagado dependa de ella.
+
+La guarda de ciclos es por llamada, no compartida entre invocaciones, y corta antes de recursar.
+
+- [x] **Step 7: Coalescer `flushBuffer` y exponer `bufferSize`**
+
+El apagado necesita saber cuántos mensajes quedaron sin persistir, y `bufferSize` es la única fuente honesta de ese número. Pero `vaciar` arranca drenando, así que **mientras una corrida está en vuelo el buffer está vacío y `bufferSize` miente**: lo que esa corrida no logre persistir vuelve recién al reencolar.
+
+Sin coalescing hay pérdida silenciosa. Si la señal llega mientras el reintento periódico está a mitad de un vaciado —realista con la base caída, donde `persist` tarda segundos por timeout y el buffer puede tener cientos de mensajes—, el vaciado del apagado drena un buffer vacío, devuelve 0, lee `bufferSize === 0`, loguea "buffer vaciado" **sin emitir el error de pérdida**, cierra la base, y recién entonces el vaciado en vuelo reencola en un buffer que ya nadie va a mirar.
+
+```ts
+// src/capture/ingest.ts
+// `vaciar` arranca drenando el buffer, así que mientras una corrida está en vuelo el
+// buffer está vacío y `bufferSize` no dice la verdad: lo que esa corrida no logre
+// persistir vuelve recién al reencolar. Esperar al vaciado en vuelo en vez de arrancar
+// otro corre la lectura de `bufferSize` hasta después de ese reencolado, que es el
+// único momento en que refleja lo que de verdad quedó sin persistir.
+let enVuelo: Promise<number> | null = null
+
+/** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */
+function flushBuffer(): Promise<number> {
+  enVuelo ??= vaciar().finally(() => {
+    enVuelo = null
+  })
+  return enVuelo
+}
+
+return {
+  handle,
+  flushBuffer,
+  /** Lo que todavía no se pudo persistir: el apagado lo reporta como pérdida. */
+  get bufferSize(): number {
+    return buffer.size
+  },
+}
+```
+
+Test: `dos flush concurrentes resuelven el mismo vaciado una sola vez`. Sin el arreglo falla con `Expected: 2 / Received: 0`, porque el segundo drena la nada.
+
+- [x] **Step 8: Implementar el apagado ordenado**
+
+Va en su propio módulo, no inline en `src/index.ts`. El entrypoint no se puede testear —tiene efectos de arranque y `process.exit`— y el apagado es la parte más fácil de arruinar: el orden de los pasos, la idempotencia ante dos señales y la cuenta de perdidos son justo lo que hay que fijar con tests. `createShutdown` recibe solo lo que usa, así que no es una capa de inyección para el entrypoint sino una función con cinco dependencias explícitas.
+
+```ts
+// src/shutdown.ts
+export interface ShutdownDeps {
+  /** Lo mínimo del pipeline de ingesta: vaciar lo encolado y saber qué queda. */
+  pipeline: {
+    flushBuffer(): Promise<number>
+    readonly bufferSize: number
+  }
+  provider: Pick<MessagingProvider, 'disconnect'>
+  closeDb: () => Promise<void>
+  /** Corta el reintento periódico del buffer. */
+  stopRetries: () => void
+  log: Logger
+}
+
+export interface Shutdown {
+  /**
+   * Apaga una sola vez y devuelve cuántos mensajes quedaron sin persistir.
+   *
+   * Nunca rechaza: la invocan manejadores de señales, donde un rechazo sin capturar
+   * mata el proceso a mitad del apagado, y como la promesa queda cacheada ese rechazo
+   * se repetiría en cada señal posterior.
+   */
+  apagar(): Promise<number>
+  /**
+   * Hay un apagado en marcha o terminado. Quien esperaba al proveedor lo consulta para
+   * distinguir un fallo de conexión de la desconexión que pidió la señal.
+   */
+  readonly enCurso: boolean
+}
+
+/**
+ * Apagado ordenado: primero vacía el buffer, después suelta los recursos.
+ *
+ * El orden importa. Si desconectáramos antes de vaciar, un Ctrl-C entre dos
+ * reintentos periódicos tiraría mensajes que la base ya podía aceptar, que es
+ * justo lo que el buffer existe para evitar.
+ */
+export function createShutdown(deps: ShutdownDeps): Shutdown {
+  /** Último recurso: si el canal de avisos es lo que falla, el apagado igual sigue. */
+  function reportar(falla: string, error: unknown): void {
+    try {
+      deps.log.error(`apagado: ${falla}`, { error: describirError(error) })
+    } catch {
+      // Sin dónde avisar. Cortar el apagado acá cuesta más que perder el aviso.
+    }
+  }
+
+  /** Aísla un paso: ninguno puede saltearse los que siguen ni hacer rechazar el apagado. */
+  async function paso(falla: string, accion: () => void | Promise<void>): Promise<boolean> {
+    try {
+      await accion()
+      return true
+    } catch (error) {
+      reportar(falla, error)
+      return false
+    }
+  }
+
+  /**
+   * Devuelve los mensajes que se pierden: los que sobreviven al último intento.
+   *
+   * Reintenta si queda algo encolado. `flushBuffer` coalesce, así que el primer llamado
+   * puede devolver el resultado de un vaciado en vuelo que ya había drenado, y lo que
+   * entró al buffer en el medio nunca tuvo su intento. Para el segundo llamado
+   * `stopRetries` ya corrió y el vaciado anterior terminó: arranca sin competencia.
+   */
+  async function vaciar(): Promise<number> {
+    let persistidos = 0
+    try {
+      persistidos = await deps.pipeline.flushBuffer()
+      if (deps.pipeline.bufferSize > 0) persistidos += await deps.pipeline.flushBuffer()
+    } catch (error) {
+      const perdidos = deps.pipeline.bufferSize
+      deps.log.error('apagado: falló el vaciado del buffer', {
+        perdidos,
+        error: describirError(error),
+      })
+      return perdidos
+    }
+
+    deps.log.info('apagado: buffer vaciado', { persistidos })
+
+    // `flushBuffer` no propaga el fallo por mensaje: reencola lo que no entró.
+    const perdidos = deps.pipeline.bufferSize
+    if (perdidos > 0) {
+      deps.log.error('apagado: se pierden mensajes que no se pudieron persistir', { perdidos })
+    }
+    return perdidos
+  }
+
+  async function correr(): Promise<number> {
+    let perdidos = 0
+    await paso('no se pudo cortar el reintento del buffer', () => deps.stopRetries())
+    const vaciado = await paso('quedó a medias el vaciado del buffer', async () => {
+      perdidos = await vaciar()
+    })
+    // Si `vaciar` no llegó a devolver, la cuenta se lee del buffer. Un aviso roto rompe el
+    // paso después de que la pérdida ya ocurrió, y ese es el número que decide si el proceso
+    // sale con cero: perderlo acá es anunciar un apagado limpio que tiró mensajes.
+    if (!vaciado) perdidos = deps.pipeline.bufferSize
+    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
+    await paso('no se pudo cerrar la base', () => deps.closeDb())
+    await paso('no se pudo anunciar el final', () => deps.log.info('apagado completo'))
+    return perdidos
+  }
+
+  let enCurso: Promise<number> | null = null
+
+  return {
+    // Un Ctrl-C impaciente manda dos señales: la segunda espera el mismo apagado.
+    apagar: () => (enCurso ??= correr()),
+    get enCurso(): boolean {
+      return enCurso !== null
+    },
+  }
+}
+```
+
+Cuatro detalles que costaron una ronda de revisión cada uno:
+
+**El vaciado detecta la pérdida por dos caminos.** `flushBuffer` atrapa el error por mensaje y reencola, así que no rechaza: el camino que se dispara de verdad es el `bufferSize > 0` posterior. El `try/catch` cubre el día en que eso cambie.
+
+**Aislar cada paso no alcanza con envolver `stopRetries`.** Cualquier lectura de `bufferSize` y cualquier `log.*` dentro de `vaciar` también podían hacer rechazar a `apagar`, y como `enCurso` cachea la promesa, ese rechazo se repite en cada señal posterior y el `void apagarYSalir()` del entrypoint lo convierte en rechazo sin manejar. De ahí el helper `paso` y el `catch` vacío de `reportar`: si el logger es lo que se rompió, el aviso de que se rompió también se rompe.
+
+**`perdidos` se lee del buffer cuando el vaciado no llega a devolver.** El `log.info` de éxito está afuera del `try` de `vaciar` a propósito —adentro, un aviso roto se reportaba como fallo de vaciado con un `perdidos` que no correspondía—, pero eso significa que si ese log tira, `vaciar()` rechaza y el número medido se va con el rechazo: `perdidos` quedaba en 0 y el proceso salía con 0 habiendo tirado mensajes. Medir antes de avisar no lo arregla, porque el problema no es cuándo se mide sino que el valor no logra salir de la función. Por eso `paso` devuelve si salió bien y `correr` cae a `bufferSize`.
+
+**El reintento cuesta una pasada extra.** Cuando lo que queda es genuinamente impersistible, el segundo `flushBuffer()` reintenta cada mensaje y falla de nuevo: la cota es 2x, medida en 4 s con 1000 mensajes a 2 ms de intento. Es barato al lado de perder un mensaje salvable, y con la interfaz actual el apagado no puede distinguir "quedó algo que nunca tuvo su intento" de "quedó algo que ya falló".
+
+Tests en `tests/shutdown.test.ts` (10): orden de los pasos como lista, pérdida parcial, reintento por lo que entró durante el vaciado anterior, vaciado que falla, dos señales concurrentes, `enCurso`, fallo del proveedor, fallo de la base, aviso roto que no borra la cuenta, y causa circular que no borra la cuenta. El fake del pipeline descuenta lo persistido de un contador de pendientes: con un `bufferSize` fijo, los tests pasarían igual si la pérdida se midiera **antes** del último intento.
+
+- [x] **Step 9: Implementar el punto de entrada**
+
+Ver `src/index.ts`. La estructura es: config y logger, parseo del subcomando, proveedor, rama de listado, y recién después base, política, pipeline, reintento periódico, señales y arranque.
+
+Cinco decisiones que no estaban en el plan original:
+
+**`createDb` va después de la rama de listado.** El listado no consulta la base, así que no abre el pool ni tiene que cerrarlo.
+
+**El arranque de la captura va envuelto, y consulta `shutdown.enCurso`.** Sin `try`, un `SIGINT` durante la espera del QR mataba el proceso a mitad del apagado: el apagado llama a `provider.disconnect()`, que hace `settleReadyWaiters(error)` y **rechaza el `waitUntilReady()` pendiente en el top-level await**, que no tiene quién lo capture. Salía con stack trace, código 1 y sin cerrar el pool, en la interacción más común del primer arranque. El `catch` distingue los dos casos: con un apagado en curso el rechazo es la desconexión que la señal pidió, no un fallo de conexión, y anunciarlo como tal mandaría a buscar un problema que no existe.
+
+**La rama de listado registra sus propias señales.** También espera el QR, y es el comando que se corre *antes* de tener credenciales, o sea donde más tiempo se pasa mirando un QR. Sin manejador, la señal mataba el proceso con el socket abierto. Acá no hay base ni buffer, así que el apagado ordenado sería de más: alcanza con soltar el proveedor y salir con `128 + señal`. Pero desconectar hace rechazar a quien esperaba el QR, así que el `catch` del listado corre igual y hay que impedirle atribuirse un fallo ajeno: de ahí el `cortando`, que el `catch` consulta y que el final espera para cederle el código de salida a la señal.
+
+**El fallo de `loadCapturePolicy` cierra el pool antes de salir.** Sin política no hay captura, y morir con stack trace dejaba conexiones abiertas.
+
+**El proceso sale con 1 si el apagado perdió mensajes.** Un supervisor que solo mira el código de salida no tiene que poder confundir un apagado que tiró mensajes con uno limpio. Depende de que no haya un bucle de reinicio detrás; con uno, habría que distinguir la señal de la caída.
+
+- [x] **Step 10: Correr la suite completa y verificar tipos**
 
 ```bash
 bun run db:up
@@ -4089,9 +4269,11 @@ bun test
 bun run typecheck
 ```
 
-Expected: todos los tests en verde y sin errores de tipos.
+Expected: 118 tests en verde sobre 16 archivos y sin errores de tipos.
 
-- [ ] **Step 7: Prueba manual de vinculación**
+- [ ] **Step 11: Prueba manual de vinculación**
+
+Esto lo hace una persona, no el implementador: hace falta un teléfono. **Queda pendiente.**
 
 ```bash
 bun run src/index.ts list-conversations
@@ -4099,10 +4281,12 @@ bun run src/index.ts list-conversations
 
 Expected: aparece un QR en la terminal la primera vez. Al escanearlo desde WhatsApp en Dispositivos vinculados, se listan los grupos con sus identificadores. Copiar el del grupo de control a `CONTROL_CONVERSATION_ID` en `.env`.
 
-- [ ] **Step 8: Commitear**
+Todo lo que se puede verificar sin teléfono está cubierto: el parseo, el formato de salida, el apagado, y el `SIGINT` durante la espera del QR en las dos ramas, reproducido con un doble del socket de baileys sobre el `WhatsAppProvider` real.
+
+- [x] **Step 12: Commitear**
 
 ```bash
-git add src/index.ts src/logger.ts tests/logger.test.ts
+git add src tests
 git commit -m "feat: punto de entrada de captura y listado de conversaciones"
 ```
 
