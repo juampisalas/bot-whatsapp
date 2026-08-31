@@ -1,4 +1,9 @@
-import type { FatalHandler, InboundHandler, MessagingProvider } from '../../domain/provider.ts'
+import type {
+  ConversationMetaHandler,
+  FatalHandler,
+  InboundHandler,
+  MessagingProvider,
+} from '../../domain/provider.ts'
 import type {
   ConversationRef,
   ConversationSummary,
@@ -30,6 +35,7 @@ export class FakeProvider implements MessagingProvider {
 
   private handler: InboundHandler | null = null
   private fatalHandler: FatalHandler | null = null
+  private conversationMetaHandler: ConversationMetaHandler | null = null
   private connected = false
   private nextSendError: Error | null = null
   private readonly downloadErrors: Error[] = []
@@ -51,7 +57,7 @@ export class FakeProvider implements MessagingProvider {
   }
 
   async waitUntilReady(): Promise<void> {
-    if (!this.connected) throw new Error('FakeProvider sin conectar')
+    if (!this.connected) throw new Error('FakeProvider is not connected')
   }
 
   async disconnect(): Promise<void> {
@@ -66,16 +72,27 @@ export class FakeProvider implements MessagingProvider {
     this.fatalHandler = handler
   }
 
-  // Solo para tests: no forman parte del puerto MessagingProvider; no invocar desde producción.
+  onConversationMeta(handler: ConversationMetaHandler): void {
+    this.conversationMetaHandler = handler
+  }
+
+  // Test-only helpers: not part of MessagingProvider; do not call from production.
   async inject(message: InboundMessage): Promise<void> {
-    if (!this.connected) throw new Error('FakeProvider sin conectar')
-    if (!this.handler) throw new Error('FakeProvider sin manejador registrado')
+    if (!this.connected) throw new Error('FakeProvider is not connected')
+    if (!this.handler) throw new Error('FakeProvider has no message handler registered')
     await this.handler(message)
   }
 
-  /** Dispara el canal de fallo terminal sin necesitar una sesión rota de verdad. */
+  /** Fires the fatal channel without needing a real broken session. */
   emitFatal(error: Error): void {
     this.fatalHandler?.(error)
+  }
+
+  /** Test-only: publish conversation metadata the same way WhatsApp would. */
+  async emitConversationMeta(
+    conversation: Parameters<ConversationMetaHandler>[0],
+  ): Promise<void> {
+    await this.conversationMetaHandler?.(conversation)
   }
 
   failNextSend(error: Error): void {
@@ -86,7 +103,7 @@ export class FakeProvider implements MessagingProvider {
     this.downloadErrors.push(error)
   }
 
-  // Solo para tests: mantiene descargas superpuestas sin depender de demoras del scheduler.
+  // Test-only: keeps overlapping downloads without depending on scheduler delays.
   blockDownloads(): DownloadBarrier {
     let signalEntered = (): void => {}
     let releaseWait = (): void => {}

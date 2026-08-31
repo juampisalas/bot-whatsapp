@@ -22,7 +22,7 @@ test('descarta los más antiguos al superar el límite y los cuenta', () => {
 })
 
 test.each([0, -1, 1.5])('rechaza el límite inválido %p', (limit) => {
-  expect(() => new BoundedBuffer<number>(limit)).toThrow(/entero positivo/)
+  expect(() => new BoundedBuffer<number>(limit)).toThrow(/positive integer/)
 })
 
 test('mantiene el total acumulado de descartes después de vaciarse', () => {

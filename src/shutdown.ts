@@ -1,121 +1,155 @@
-import { describirError, type Logger } from './domain/logger.ts'
+import type { Logger } from './domain/logger.ts'
+import { describeError } from './domain/logger.ts'
 import type { MessagingProvider } from './domain/provider.ts'
 
 export interface ShutdownDeps {
-  /** Lo mínimo del pipeline de ingesta: vaciar lo encolado y saber qué queda. */
+  /** Minimum ingest pipeline surface: flush queued messages and report what remains. */
   pipeline: {
     flushBuffer(): Promise<number>
     readonly bufferSize: number
   }
   provider: Pick<MessagingProvider, 'disconnect'>
   closeDb: () => Promise<void>
-  /** Corta el reintento periódico del buffer. */
+  /** Stops the periodic buffer retry timer. */
   stopRetries: () => void
   log: Logger
+  /** Hard deadline for the whole shutdown sequence. Default 15s. */
+  timeoutMs?: number
 }
 
 export interface Shutdown {
   /**
-   * Apaga una sola vez y devuelve cuántos mensajes quedaron sin persistir.
+   * Runs once and returns how many messages were left unpersisted.
    *
-   * Nunca rechaza: la invocan manejadores de señales, donde un rechazo sin capturar
-   * mata el proceso a mitad del apagado, y como la promesa queda cacheada ese rechazo
-   * se repetiría en cada señal posterior.
+   * Never rejects: signal handlers call this, and an uncaught rejection would kill
+   * the process mid-shutdown; the cached promise would then reject on every later signal.
    */
-  apagar(): Promise<number>
+  shutDown(): Promise<number>
   /**
-   * Hay un apagado en marcha o terminado. Quien esperaba al proveedor lo consulta para
-   * distinguir un fallo de conexión de la desconexión que pidió la señal.
+   * True once a shutdown has started or finished. Callers waiting on the provider use
+   * this to tell a connect failure apart from the disconnect they themselves requested.
    */
-  readonly enCurso: boolean
+  readonly inProgress: boolean
 }
 
 /**
- * Apagado ordenado: primero corta la entrada, después vacía el buffer y recién ahí
- * suelta los recursos.
+ * Ordered shutdown: cut input first, then flush the buffer, then release resources.
  *
- * El orden importa. Desconectar no toca el buffer, así que cerrar la entrada primero
- * no cuesta nada: el vaciado que sigue igual levanta lo que había. Vaciar primero, en
- * cambio, deja afuera al mensaje que estaba en vuelo cuando llegó la señal —el
- * proveedor lo espera al desconectar, su persistencia falla contra una base que ya se
- * está yendo y cae al buffer después del último intento, donde no lo lee nadie—.
+ * Order matters. Disconnect does not touch the buffer, so cutting input first is free:
+ * the flush that follows still drains what was queued. Flushing first would miss the
+ * message that was in flight when the signal arrived — the provider waits for it on
+ * disconnect, its persist fails against a closing database, and it lands in the buffer
+ * after the last flush attempt, where nobody reads it.
  */
 export function createShutdown(deps: ShutdownDeps): Shutdown {
-  /** Último recurso: si el canal de avisos es lo que falla, el apagado igual sigue. */
-  function reportar(falla: string, error: unknown): void {
+  const timeoutMs = deps.timeoutMs ?? 15_000
+
+  /** Last resort: if the log channel itself is broken, shutdown still continues. */
+  function report(failure: string, error: unknown): void {
     try {
-      deps.log.error(`apagado: ${falla}`, { error: describirError(error) })
+      deps.log.error(`shutdown: ${failure}`, { error: describeError(error) })
     } catch {
-      // Sin dónde avisar. Cortar el apagado acá cuesta más que perder el aviso.
+      // Nowhere to report. Aborting shutdown here costs more than losing the notice.
     }
   }
 
-  /** Aísla un paso: ninguno puede saltearse los que siguen ni hacer rechazar el apagado. */
-  async function paso(falla: string, accion: () => void | Promise<void>): Promise<boolean> {
+  /** Isolates a step: none may skip later ones or make shutdown reject. */
+  async function step(failure: string, action: () => void | Promise<void>): Promise<boolean> {
     try {
-      await accion()
+      await action()
       return true
     } catch (error) {
-      reportar(falla, error)
-      return false
+      report(failure, error)
     }
+    return false
   }
 
   /**
-   * Devuelve los mensajes que se pierden: los que sobreviven al último intento.
+   * Returns messages that will be lost: those that survive the last attempt.
    *
-   * Reintenta si queda algo encolado. `flushBuffer` coalesce, así que el primer llamado
-   * puede devolver el resultado de un vaciado en vuelo que ya había drenado, y lo que
-   * entró al buffer en el medio nunca tuvo su intento. Para el segundo llamado
-   * `stopRetries` ya corrió y el vaciado anterior terminó: arranca sin competencia.
+   * Retries if anything remains queued. `flushBuffer` coalesces, so the first call may
+   * return the result of an in-flight flush that already drained, leaving arrivals in
+   * between without an attempt. By the second call `stopRetries` has run and the prior
+   * flush finished: it starts without competition.
    */
-  async function vaciar(): Promise<number> {
-    let persistidos = 0
+  async function flush(): Promise<number> {
+    let persisted = 0
     try {
-      persistidos = await deps.pipeline.flushBuffer()
-      if (deps.pipeline.bufferSize > 0) persistidos += await deps.pipeline.flushBuffer()
+      persisted = await deps.pipeline.flushBuffer()
+      if (deps.pipeline.bufferSize > 0) persisted += await deps.pipeline.flushBuffer()
     } catch (error) {
-      const perdidos = deps.pipeline.bufferSize
-      deps.log.error('apagado: falló el vaciado del buffer', {
-        perdidos,
-        error: describirError(error),
+      const lost = deps.pipeline.bufferSize
+      deps.log.error('shutdown: buffer flush failed', {
+        lost,
+        error: describeError(error),
       })
-      return perdidos
+      return lost
     }
 
-    deps.log.info('apagado: buffer vaciado', { persistidos })
+    deps.log.info('shutdown: buffer flushed', { persisted })
 
-    // `flushBuffer` no propaga el fallo por mensaje: reencola lo que no entró.
-    const perdidos = deps.pipeline.bufferSize
-    if (perdidos > 0) {
-      deps.log.error('apagado: se pierden mensajes que no se pudieron persistir', { perdidos })
+    // `flushBuffer` does not propagate per-message failures: it requeues what did not land.
+    const lost = deps.pipeline.bufferSize
+    if (lost > 0) {
+      deps.log.error('shutdown: dropping messages that could not be persisted', { lost })
     }
-    return perdidos
+    return lost
   }
 
-  async function correr(): Promise<number> {
-    let perdidos = 0
-    await paso('no se pudo cortar el reintento del buffer', () => deps.stopRetries())
-    await paso('no se pudo cerrar el proveedor', () => deps.provider.disconnect())
-    const vaciado = await paso('quedó a medias el vaciado del buffer', async () => {
-      perdidos = await vaciar()
+  async function run(): Promise<number> {
+    let lost = 0
+    let timedOut = false
+    let settleTimeout: (() => void) | null = null
+    const deadline = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        timedOut = true
+        resolve()
+      }, timeoutMs)
+      settleTimeout = () => {
+        clearTimeout(timer)
+        resolve()
+      }
     })
-    // Si `vaciar` no llegó a devolver, la cuenta se lee del buffer. Un aviso roto rompe el
-    // paso después de que la pérdida ya ocurrió, y ese es el número que decide si el proceso
-    // sale con cero: perderlo acá es anunciar un apagado limpio que tiró mensajes.
-    if (!vaciado) perdidos = deps.pipeline.bufferSize
-    await paso('no se pudo cerrar la base', () => deps.closeDb())
-    await paso('no se pudo anunciar el final', () => deps.log.info('apagado completo'))
-    return perdidos
+
+    const work = (async (): Promise<number> => {
+      await step('could not stop buffer retries', () => deps.stopRetries())
+      await step('could not close the provider', () => deps.provider.disconnect())
+      if (timedOut) return deps.pipeline.bufferSize
+      const flushed = await step('buffer flush finished incompletely', async () => {
+        lost = await flush()
+      })
+      // If `flush` never returned, read the count from the buffer. A broken log after the
+      // loss already happened would otherwise hide the number that decides the exit code.
+      if (!flushed) lost = deps.pipeline.bufferSize
+      if (timedOut) return deps.pipeline.bufferSize
+      await step('could not close the database', () => deps.closeDb())
+      await step('could not announce completion', () => deps.log.info('shutdown complete'))
+      return lost
+    })()
+
+    const result = await Promise.race([
+      work.finally(() => settleTimeout?.()),
+      deadline.then(() => {
+        if (timedOut) {
+          deps.log.error('shutdown: timed out', { lost: deps.pipeline.bufferSize })
+          void deps.provider.disconnect().catch(() => {})
+          void deps.closeDb().catch(() => {})
+          return deps.pipeline.bufferSize
+        }
+        return work
+      }),
+    ])
+
+    return result
   }
 
-  let enCurso: Promise<number> | null = null
+  let inProgress: Promise<number> | null = null
 
   return {
-    // Un Ctrl-C impaciente manda dos señales: la segunda espera el mismo apagado.
-    apagar: () => (enCurso ??= correr()),
-    get enCurso(): boolean {
-      return enCurso !== null
+    // An impatient Ctrl-C fires two signals: the second waits on the same shutdown.
+    shutDown: () => (inProgress ??= run()),
+    get inProgress(): boolean {
+      return inProgress !== null
     },
   }
 }

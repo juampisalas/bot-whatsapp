@@ -2,79 +2,85 @@ import { createIngestPipeline } from './capture/ingest.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
 import { loadConfig } from './config/index.ts'
-import { describirError } from './domain/logger.ts'
+import { describeError } from './domain/logger.ts'
 import { createLogger } from './logger.ts'
 import { createProvider } from './providers/registry.ts'
 import { createShutdown } from './shutdown.ts'
 import { createDb } from './store/client.ts'
 import { loadCapturePolicy } from './store/repositories/capture-policy.ts'
+import { upsertConversation } from './store/repositories/conversations.ts'
 
 const config = loadConfig()
 const log = createLogger(config.LOG_LEVEL)
 
-let comando: Command
+let command: Command
 try {
-  comando = parseCommand(process.argv.slice(2))
+  command = parseCommand(process.argv.slice(2))
 } catch (error) {
-  // Un error de uso no merece un stack trace: alcanza con el mensaje y un código distinto de cero.
-  log.error(describirError(error))
+  // A usage error does not deserve a stack trace: the message and a non-zero exit suffice.
+  log.error(describeError(error))
   process.exit(1)
 }
 
 const provider = createProvider(config.PROVIDER, config, log)
 
-if (comando === 'list-conversations') {
+if (command === 'list-conversations') {
   /**
-   * La espera del QR de acá abajo puede durar minutos y es la que más se mira: el listado se
-   * corre antes de tener credenciales. Sin manejador propio, la señal mata el proceso con el
-   * socket abierto y las credenciales a medio escribir. Acá todavía no hay base ni buffer, así
-   * que el apagado ordenado del modo captura sería de más: alcanza con soltar el proveedor.
+   * The QR wait below can last many minutes and is the path people watch most: listing
+   * runs before credentials exist. Without a handler, the signal kills the process with
+   * the socket open and credentials mid-write. There is no database or buffer here yet, so
+   * the ordered capture shutdown would be overkill: releasing the provider is enough.
    */
-  let cortando: Promise<never> | null = null
-  const cortar = (senal: number): void => {
-    // Un Ctrl-C impaciente no arranca una segunda desconexión sobre la primera.
-    cortando ??= (async (): Promise<never> => {
+  let shuttingDown: Promise<never> | null = null
+  const shutDownOnSignal = (signal: number): void => {
+    // An impatient Ctrl-C must not start a second disconnect on top of the first.
+    // Use `on` (not `once`): a second signal must still hit this handler while disconnect
+    // is in flight; otherwise Node's default terminates mid-credential write.
+    shuttingDown ??= (async (): Promise<never> => {
       try {
         await provider.disconnect()
       } catch (error) {
-        log.error('no se pudo cerrar la conexión', { error: describirError(error) })
+        log.error('could not close the connection', { error: describeError(error) })
       }
-      process.exit(128 + senal)
+      process.exit(128 + signal)
     })()
   }
 
-  process.once('SIGINT', () => cortar(2))
-  process.once('SIGTERM', () => cortar(15))
+  process.on('SIGINT', () => shutDownOnSignal(2))
+  process.on('SIGTERM', () => shutDownOnSignal(15))
 
-  let codigo = 0
+  let exitCode = 0
   try {
     await provider.connect()
-    await provider.waitUntilReady()
-    for (const conversacion of await provider.listConversations()) {
-      // Salida tabulada por stdout, no por el logger: está pensada para copiar y pegar o filtrar.
-      console.log(`${conversacion.externalId}\t${conversacion.name ?? '(sin nombre)'}`)
+    // Pairing can take several minutes across QR rotations; the provider resets the timer
+    // on each QR. Pass an explicit budget so a slow first scan does not look like a list failure.
+    await provider.waitUntilReady(600_000)
+    for (const conversation of await provider.listConversations()) {
+      // Tab-separated stdout, not the logger: meant to be copied or filtered.
+      console.log(`${conversation.externalId}\t${conversation.name ?? '(unnamed)'}`)
     }
   } catch (error) {
-    // Con una señal en curso el rechazo es de la desconexión que ella pidió, no un fallo de
-    // listado: anunciarlo como tal mandaría a buscar un problema que no existe.
-    if (cortando === null) {
-      log.error('no se pudieron listar las conversaciones', { error: describirError(error) })
-      codigo = 1
+    // With a signal in flight the rejection is from the disconnect it requested, not a
+    // listing failure: reporting it as such would send people looking for a problem that
+    // does not exist.
+    if (shuttingDown === null) {
+      log.error('could not list conversations', { error: describeError(error) })
+      exitCode = 1
     }
   }
 
-  // Se desconecta afuera del try: un fallo al listar no justifica dejar el socket abierto.
+  // Disconnect outside the try: a listing failure is no reason to leave the socket open.
   try {
     await provider.disconnect()
   } catch (error) {
-    log.error('no se pudo cerrar la conexión', { error: describirError(error) })
+    log.error('could not close the connection', { error: describeError(error) })
   }
 
-  // El final lo decide la señal si llegó: `cortar` sale con su propio código y no devuelve.
-  if (cortando) await cortando
+  // If a signal arrived, `shutDownOnSignal` exits with its own code and never returns.
+  if (shuttingDown) await shuttingDown
 
-  // baileys deja temporizadores propios; salir explícito evita que el proceso quede colgado.
-  process.exit(codigo)
+  // Baileys leaves its own timers; an explicit exit avoids a hung process.
+  process.exit(exitCode)
 }
 
 const { db, close } = createDb(config.DATABASE_URL)
@@ -83,16 +89,16 @@ let policy: CapturePolicy
 try {
   policy = await loadCapturePolicy(db, provider.id)
 } catch (error) {
-  log.error('no se pudo cargar la política de captura', { error: describirError(error) })
-  // Sin política no hay captura: soltar el pool acá evita terminar con conexiones abiertas.
+  log.error('could not load capture policy', { error: describeError(error) })
+  // Without a policy there is no capture: release the pool so we do not exit with open connections.
   try {
     await close()
-  } catch (fallo) {
-    log.error('no se pudo cerrar la base', { error: describirError(fallo) })
+  } catch (failure) {
+    log.error('could not close the database', { error: describeError(failure) })
   }
   process.exit(1)
 }
-log.info('política de captura cargada', { modo: policy.mode, reglas: policy.rules.size })
+log.info('capture policy loaded', { mode: policy.mode, rules: policy.rules.size })
 
 const pipeline = createIngestPipeline({
   db,
@@ -104,8 +110,24 @@ const pipeline = createIngestPipeline({
 
 provider.onMessage(pipeline.handle)
 
-// Reintenta lo que quedó en el buffer cuando la base no respondía.
-const reintento = setInterval(() => {
+provider.onConversationMeta?.(async (conversation) => {
+  try {
+    await upsertConversation(db, {
+      provider: provider.id,
+      externalId: conversation.externalId,
+      kind: conversation.kind,
+      name: conversation.name,
+    })
+  } catch (error) {
+    log.warn('could not upsert conversation metadata', {
+      externalId: conversation.externalId,
+      error: describeError(error),
+    })
+  }
+})
+
+// Retry whatever stayed in the buffer while the database was down.
+const retryTimer = setInterval(() => {
   void pipeline.flushBuffer()
 }, 30_000)
 
@@ -113,49 +135,49 @@ const shutdown = createShutdown({
   pipeline,
   provider,
   closeDb: close,
-  stopRetries: () => clearInterval(reintento),
+  stopRetries: () => clearInterval(retryTimer),
   log,
 })
 
 /**
- * Un apagado que tiró mensajes no sale con cero: un supervisor que solo mira el código
- * de salida no tiene que poder confundirlo con uno limpio. Depende de que no haya un
- * bucle de reinicio detrás; con uno, habría que distinguir la señal de la caída.
+ * A shutdown that dropped messages must not exit zero: a supervisor that only watches the
+ * exit code must not mistake it for a clean one. Assumes there is no restart loop behind
+ * us; with one, signal and crash would need to be distinguished.
  */
-function salir(perdidos: number): never {
-  process.exit(perdidos > 0 ? 1 : 0)
+function exit(lost: number): never {
+  process.exit(lost > 0 ? 1 : 0)
 }
 
-async function apagarYSalir(): Promise<void> {
-  salir(await shutdown.apagar())
+async function shutDownAndExit(): Promise<void> {
+  exit(await shutdown.shutDown())
 }
 
 /**
- * Un fallo terminal del proveedor sale con uno aunque no se pierda ningún mensaje: el
- * proceso dejó de capturar y sin código de salida un supervisor lo ve sano para siempre.
+ * A terminal provider failure exits one even with no lost messages: the process stopped
+ * capturing, and without a non-zero code a supervisor would see it as healthy forever.
  */
-async function apagarPorFalloTerminal(error: Error): Promise<never> {
-  log.error('el proveedor no puede seguir capturando', { error: describirError(error) })
-  await shutdown.apagar()
+async function shutDownOnTerminalFailure(error: Error): Promise<never> {
+  log.error('provider can no longer capture', { error: describeError(error) })
+  await shutdown.shutDown()
   process.exit(1)
 }
 
-process.on('SIGINT', () => void apagarYSalir())
-process.on('SIGTERM', () => void apagarYSalir())
-provider.onFatal((error) => void apagarPorFalloTerminal(error))
+process.on('SIGINT', () => void shutDownAndExit())
+process.on('SIGTERM', () => void shutDownAndExit())
+provider.onFatal((error) => void shutDownOnTerminalFailure(error))
 
-// Las señales se registran antes de conectar para poder cortar la espera del QR.
+// Signals are registered before connect so the QR wait can be interrupted.
 try {
   await provider.connect()
-  await provider.waitUntilReady()
+  await provider.waitUntilReady(600_000)
 } catch (error) {
-  if (shutdown.enCurso) {
-    // La señal ya pidió la desconexión y el proveedor rechaza a quien lo esperaba: no es
-    // un fallo de conexión sino el apagado haciendo lo suyo. Alcanza con acompañarlo.
-    salir(await shutdown.apagar())
+  if (shutdown.inProgress) {
+    // The signal already requested disconnect and the provider rejects whoever was waiting:
+    // not a connect failure but shutdown doing its job. Just accompany it.
+    exit(await shutdown.shutDown())
   }
-  log.error('no se pudo conectar con el proveedor', { error: describirError(error) })
-  await shutdown.apagar()
+  log.error('could not connect to the provider', { error: describeError(error) })
+  await shutdown.shutDown()
   process.exit(1)
 }
-log.info('capturando mensajes')
+log.info('capturing messages')

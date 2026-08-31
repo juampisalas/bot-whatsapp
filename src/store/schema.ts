@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import {
+  bigint,
   boolean,
   check,
   index,
@@ -117,8 +118,9 @@ export const attachments = pgTable(
     externalId: text('external_id').notNull(),
     kind: text('kind').$type<AttachmentKind>().notNull(),
     mimeType: text('mime_type'),
-    sizeBytes: integer('size_bytes'),
-    /** Duración en milisegundos para audio y video. Null en el resto. */
+    /** WhatsApp reports fileLength as uint64; int4 overflows near the 2 GiB document limit. */
+    sizeBytes: bigint('size_bytes', { mode: 'number' }),
+    /** Duration in milliseconds for audio and video. Null otherwise. */
     durationMs: integer('duration_ms'),
     /** Ruta en disco una vez descargado. Null mientras esté pendiente o fallido. */
     localPath: text('local_path'),

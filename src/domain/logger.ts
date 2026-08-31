@@ -7,28 +7,27 @@ export interface Logger {
 export const silentLogger: Logger = { info: () => {}, warn: () => {}, error: () => {} }
 
 /**
- * Arma la línea de `error` de un log sin stack trace.
+ * Builds a single-line error string with no stack trace.
  *
- * Encadena las causas porque quien envuelve suele no nombrarlas: drizzle reporta
- * "Failed query" y deja el `ECONNREFUSED` adentro, que es lo único que le sirve a
- * quien está mirando por qué no arrancó.
+ * Walks the cause chain because wrappers often hide the useful bit: drizzle reports
+ * "Failed query" and leaves `ECONNREFUSED` inside, which is what you need when
+ * diagnosing a failed start.
  */
-export function describirError(error: unknown): string {
-  return describirCadena(error, new Set())
+export function describeError(error: unknown): string {
+  return describeCauseChain(error, new Set())
 }
 
 /**
- * Corta si la cadena de causas se cierra en ciclo (`a.cause = b`, `b.cause = a`): sin eso
- * la recursión desborda la pila justo cuando se está intentando reportar un fallo, y quien
- * llama suele estar en un camino de error donde ya no queda dónde avisar.
+ * Stops if the cause chain cycles (`a.cause = b`, `b.cause = a`): without that the
+ * recursion overflows the stack exactly when we are trying to report a failure.
  */
-function describirCadena(error: unknown, vistos: Set<unknown>): string {
+function describeCauseChain(error: unknown, seen: Set<unknown>): string {
   if (!(error instanceof Error)) return String(error)
 
-  const codigo = 'code' in error && typeof error.code === 'string' ? error.code : null
-  const propio = error.message || codigo || error.name
-  vistos.add(error)
-  return error.cause === undefined || vistos.has(error.cause)
-    ? propio
-    : `${propio}: ${describirCadena(error.cause, vistos)}`
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : null
+  const own = error.message || code || error.name
+  seen.add(error)
+  return error.cause === undefined || seen.has(error.cause)
+    ? own
+    : `${own}: ${describeCauseChain(error.cause, seen)}`
 }

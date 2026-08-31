@@ -229,8 +229,8 @@ test('un fallo al persistir encola el mensaje y no rechaza', async () => {
 
   expect(await handle.db.select({ id: messages.id }).from(messages)).toHaveLength(0)
   expect(warnings).toHaveLength(1)
-  expect(warnings[0]?.message).toBe('no se pudo persistir, mensaje en buffer')
-  expect(warnings[0]?.meta?.enBuffer).toBe(1)
+  expect(warnings[0]?.message).toBe('could not persist, message buffered')
+  expect(warnings[0]?.meta?.buffered).toBe(1)
   // Este es el aviso que se ve cuando la base se cae, y drizzle esconde el motivo real
   // adentro: sin recorrer la cadena de causas sale un "Failed query" que no explica nada.
   expect(warnings[0]?.meta?.error).toContain('forced ingest message failure')
@@ -295,7 +295,7 @@ test('dos flush concurrentes resuelven el mismo vaciado una sola vez', async () 
   expect(delReintento).toBe(2)
   expect(delApagado).toBe(2)
   expect(pipeline.bufferSize).toBe(0)
-  expect(infos.filter((linea) => linea.message === 'buffer vaciado')).toHaveLength(1)
+  expect(infos.filter((line) => line.message === 'buffer flushed')).toHaveLength(1)
   const rows = await handle.db
     .select({ externalId: messages.externalId })
     .from(messages)
@@ -366,9 +366,9 @@ test('flushBuffer descarta reintentos viejos antes que llegadas nuevas', async (
   expect(
     warnings.some(
       (entry) =>
-        entry.message === 'buffer descartó mensajes al reintentar' &&
-        entry.meta?.enBuffer === 2 &&
-        entry.meta?.descartados === 2,
+        entry.message === 'buffer dropped messages while retrying' &&
+        entry.meta?.buffered === 2 &&
+        entry.meta?.dropped === 2,
     ),
   ).toBe(true)
 })

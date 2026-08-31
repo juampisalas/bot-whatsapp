@@ -8,17 +8,16 @@ import type {
 } from '../../domain/types.ts'
 
 /**
- * Null para lo que llega por el mismo evento que los mensajes pero no es una conversación.
+ * Null for payloads that arrive on the same event as messages but are not a conversation.
  *
- * Los estados (`status@broadcast`) entran por `messages.upsert` como un chat más: con el
- * history sync completo, esa única fila acumularía las historias de todos los contactos y
- * el resumen se la ofrecería al usuario como si fuera alguien con quien habla.
+ * Status broadcasts (`status@broadcast`) show up on `messages.upsert` like any other chat:
+ * with full history sync that single row would accumulate every contact's stories and the
+ * summarizer would offer it as someone the user talks to.
  *
- * Las listas de difusión (`<id>@broadcast`) traen contenido real —son mensajes que mandó
- * la cuenta vinculada—, pero tampoco son un chat: no hay interlocutor y las respuestas
- * vuelven como mensajes uno a uno, así que no hay diálogo que resumir. Se descartan a
- * sabiendas de que se pierde esa copia; la conversación con cada destinatario sí se
- * captura por su lado.
+ * Broadcast lists (`<id>@broadcast`) carry real content — messages the linked account sent —
+ * but they are not a chat either: there is no interlocutor and replies come back as DMs, so
+ * there is no dialogue to summarize. They are dropped on purpose; each recipient conversation
+ * is still captured on its own side.
  */
 function conversationKind(remoteJid: string): ConversationKind | null {
   if (remoteJid.endsWith('@g.us')) return 'group'
@@ -36,7 +35,7 @@ interface MediaSpec {
 }
 
 function mediaSpec(content: proto.IMessage): MediaSpec | null {
-  // Protobuf entrega `fileLength` como número o como Long; `Number()` cubre las dos formas.
+  // Protobuf delivers `fileLength` as number or Long; `Number()` covers both.
   const toBytes = (value: unknown): number | null => {
     if (value === null || value === undefined) return null
     const parsed = Number(value)
@@ -115,22 +114,35 @@ const NORMALIZED_CONTEXT_NODES = [
   'stickerMessage',
 ] as const satisfies readonly (keyof proto.IMessage)[]
 
-function replyToExternalId(content: proto.IMessage): string | null {
+function replyToExternalId(content: proto.IMessage, remoteJid: string): string | null {
   for (const key of NORMALIZED_CONTEXT_NODES) {
     const stanzaId = content[key]?.contextInfo?.stanzaId
-    if (stanzaId) return stanzaId
+    // Same scoping as message external ids: WhatsApp ids are unique per chat, not globally.
+    if (stanzaId) return `${remoteJid}:${stanzaId}`
   }
 
   return null
 }
 
+export interface NormalizeOptions {
+  /** Subject/name known for a group from Baileys group metadata. */
+  groupName?: string | null
+}
+
+/**
+ * WhatsApp message ids are unique within a chat, not across chats. Persisting
+ * `key.id` alone under a global unique index would collide across conversations
+ * and silently drop the second message while attaching media to the wrong row.
+ * Qualifying with `remoteJid` keeps the store identity aligned with that rule.
+ */
 export function normalizeWAMessage(
   waMessage: WAMessage,
   selfJid: string,
+  options: NormalizeOptions = {},
 ): InboundMessage | null {
   const remoteJid = waMessage.key?.remoteJid
-  const externalId = waMessage.key?.id
-  if (!remoteJid || !externalId) return null
+  const messageId = waMessage.key?.id
+  if (!remoteJid || !messageId) return null
 
   const kind = conversationKind(remoteJid)
   if (!kind) return null
@@ -154,10 +166,16 @@ export function normalizeWAMessage(
     : kind === 'group'
       ? (waMessage.key?.participant ?? null)
       : remoteJid
-  // `pushName` nombra al autor, así que nombra la conversación solo cuando ese autor es el
-  // contacto del chat uno a uno.
+  // `pushName` names the author, so it names the conversation only when that author is
+  // the DM contact. Groups take their subject from Baileys group metadata instead.
   const conversationName =
-    kind === 'dm' && !fromSelf ? (waMessage.pushName ?? null) : null
+    kind === 'group'
+      ? (options.groupName ?? null)
+      : kind === 'dm' && !fromSelf
+        ? (waMessage.pushName ?? null)
+        : null
+
+  const externalId = `${remoteJid}:${messageId}`
 
   const attachments: InboundAttachment[] = media
     ? [
@@ -187,7 +205,7 @@ export function normalizeWAMessage(
     text,
     subject: null,
     threadExternalId: null,
-    replyToExternalId: replyToExternalId(content),
+    replyToExternalId: replyToExternalId(content, remoteJid),
     attachments,
     raw: waMessage,
   }

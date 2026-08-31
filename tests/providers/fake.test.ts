@@ -45,7 +45,7 @@ test('puede simular un fallo de envío una sola vez', async () => {
 
 test('rechaza inyectar antes de conectar', async () => {
   const provider = new FakeProvider()
-  await expect(provider.inject(mensaje())).rejects.toThrow(/sin conectar/)
+  await expect(provider.inject(mensaje())).rejects.toThrow(/not connected/)
 })
 
 test('avisa un fallo terminal a quien lo registró', async () => {
@@ -67,7 +67,7 @@ test('un fallo terminal sin nadie escuchando no rompe', () => {
 
 test('waitUntilReady resuelve una vez conectado y falla si no', async () => {
   const provider = new FakeProvider()
-  await expect(provider.waitUntilReady()).rejects.toThrow(/sin conectar/)
+  await expect(provider.waitUntilReady()).rejects.toThrow(/not connected/)
   await provider.connect()
   await expect(provider.waitUntilReady()).resolves.toBeUndefined()
 })

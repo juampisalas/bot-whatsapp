@@ -2,229 +2,232 @@ import { expect, test } from 'bun:test'
 import type { Logger } from '../src/domain/logger.ts'
 import { createShutdown } from '../src/shutdown.ts'
 
-interface OpcionesEntorno {
-  /** Cuántos mensajes hay encolados cuando llega la señal. */
-  pendientes?: number
-  /** Cuántos de esos rechaza la base en todo intento; por defecto, ninguno. */
-  irrecuperables?: number
+interface EnvironmentOptions {
+  /** How many messages are queued when the signal arrives. */
+  pending?: number
+  /** How many of those the database rejects on every attempt; default none. */
+  unrecoverable?: number
   /**
-   * Cuántos entran al buffer mientras corre el primer vaciado. Emula el coalescing de
-   * `flushBuffer`: el número que recibe el apagado viene de un vaciado que ya había
-   * drenado, así que estos quedan encolados sin haber tenido su intento.
+   * How many enter the buffer while the first flush runs. Emulates `flushBuffer`
+   * coalescing: the number shutdown receives comes from a flush that already drained,
+   * so these stay queued without having had their attempt.
    */
-  tardios?: number
+  late?: number
   /**
-   * Cuántos entran al buffer durante la desconexión. Emula el mensaje que estaba en vuelo
-   * cuando llegó la señal: el proveedor lo espera antes de soltar el socket y ese intento
-   * falla contra una base que ya no responde, así que termina encolado.
+   * How many enter the buffer during disconnect. Emulates the message that was in
+   * flight when the signal arrived: the provider waits for it before releasing the
+   * socket and that attempt fails against a database that no longer responds, so it
+   * ends up queued.
    */
-  enVuelo?: number
-  fallaVaciado?: Error
-  fallaDesconexion?: Error
-  fallaCierreBase?: Error
-  /** Rompe el aviso de vaciado, que corre cuando la pérdida ya está medida. */
-  fallaAviso?: Error
+  inFlight?: number
+  flushError?: Error
+  disconnectError?: Error
+  closeDbError?: Error
+  /** Breaks the flush notice, which runs after the loss is already measured. */
+  logError?: Error
 }
 
-interface Linea {
+interface Line {
   message: string
   meta?: Record<string, unknown>
 }
 
-function crearEntorno(opciones: OpcionesEntorno = {}) {
-  const orden: string[] = []
-  const infos: Linea[] = []
-  const errores: Linea[] = []
+function createEnvironment(options: EnvironmentOptions = {}) {
+  const order: string[] = []
+  const infos: Line[] = []
+  const errors: Line[] = []
   const log: Logger = {
     info: (message, meta) => {
       infos.push({ message, meta })
-      if (opciones.fallaAviso && message === 'apagado: buffer vaciado') throw opciones.fallaAviso
+      if (options.logError && message === 'shutdown: buffer flushed') throw options.logError
     },
     warn: () => {},
-    error: (message, meta) => errores.push({ message, meta }),
+    error: (message, meta) => errors.push({ message, meta }),
   }
 
-  // El buffer lleva la cuenta en vez de devolver un fijo: el vaciado lo baja en lo que dice
-  // haber persistido, así que los `perdidos` esperados solo salen si el apagado los mide
-  // después del último intento y no antes.
-  let pendientes = opciones.pendientes ?? 0
-  let tardios = opciones.tardios ?? 0
+  // The buffer keeps a live count instead of returning a fixed value: flush lowers it by
+  // what it claims to have persisted, so the expected `lost` only appear if shutdown
+  // measures them after the last attempt and not before.
+  let pending = options.pending ?? 0
+  let late = options.late ?? 0
 
   const shutdown = createShutdown({
     pipeline: {
       flushBuffer: async () => {
-        orden.push('vaciar')
-        if (opciones.fallaVaciado) throw opciones.fallaVaciado
-        const persistidos = Math.max(0, pendientes - (opciones.irrecuperables ?? 0))
-        pendientes -= persistidos
-        pendientes += tardios
-        tardios = 0
-        return persistidos
+        order.push('flush')
+        if (options.flushError) throw options.flushError
+        const persisted = Math.max(0, pending - (options.unrecoverable ?? 0))
+        pending -= persisted
+        pending += late
+        late = 0
+        return persisted
       },
       get bufferSize() {
-        return pendientes
+        return pending
       },
     },
     provider: {
       disconnect: async () => {
-        orden.push('desconectar')
-        pendientes += opciones.enVuelo ?? 0
-        if (opciones.fallaDesconexion) throw opciones.fallaDesconexion
+        order.push('disconnect')
+        pending += options.inFlight ?? 0
+        if (options.disconnectError) throw options.disconnectError
       },
     },
     closeDb: async () => {
-      orden.push('cerrarBase')
-      if (opciones.fallaCierreBase) throw opciones.fallaCierreBase
+      order.push('closeDb')
+      if (options.closeDbError) throw options.closeDbError
     },
-    stopRetries: () => orden.push('cortarReintento'),
+    stopRetries: () => order.push('stopRetries'),
     log,
   })
 
   return {
     shutdown,
-    orden,
+    order,
     infos,
-    errores,
-    get pendientes(): number {
-      return pendientes
+    errors,
+    get pending(): number {
+      return pending
     },
   }
 }
 
-test('desconecta antes de vaciar el buffer y cierra la base al final', async () => {
-  const entorno = crearEntorno({ pendientes: 3 })
+test('disconnects before flushing the buffer and closes the database last', async () => {
+  const environment = createEnvironment({ pending: 3 })
 
-  expect(await entorno.shutdown.apagar()).toBe(0)
+  expect(await environment.shutdown.shutDown()).toBe(0)
 
-  expect(entorno.orden).toEqual(['cortarReintento', 'desconectar', 'vaciar', 'cerrarBase'])
-  expect(entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos)
+  expect(environment.order).toEqual(['stopRetries', 'disconnect', 'flush', 'closeDb'])
+  expect(environment.infos.find((line) => line.meta?.persisted !== undefined)?.meta?.persisted)
     .toBe(3)
-  expect(entorno.errores).toHaveLength(0)
+  expect(environment.errors).toHaveLength(0)
 })
 
-test('persiste el mensaje que estaba en vuelo cuando llegó la señal', async () => {
-  const entorno = crearEntorno({ enVuelo: 1 })
+test('persists the message that was in flight when the signal arrived', async () => {
+  const environment = createEnvironment({ inFlight: 1 })
 
-  // Vaciar antes de desconectar deja este mensaje encolado después del último intento:
-  // el apagado devolvería cero perdidos y nadie volvería a leer ese buffer.
-  expect(await entorno.shutdown.apagar()).toBe(0)
+  // Flushing before disconnect leaves this message queued after the last attempt:
+  // shutdown would return zero lost and nobody would read that buffer again.
+  expect(await environment.shutdown.shutDown()).toBe(0)
 
-  expect(entorno.pendientes).toBe(0)
-  expect(entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos)
+  expect(environment.pending).toBe(0)
+  expect(environment.infos.find((line) => line.meta?.persisted !== undefined)?.meta?.persisted)
     .toBe(1)
 })
 
-test('avisa cuántos mensajes se pierden si el buffer no se vacía del todo', async () => {
-  const entorno = crearEntorno({ pendientes: 5, irrecuperables: 4 })
+test('reports how many messages are lost if the buffer does not fully drain', async () => {
+  const environment = createEnvironment({ pending: 5, unrecoverable: 4 })
 
-  expect(await entorno.shutdown.apagar()).toBe(4)
+  expect(await environment.shutdown.shutDown()).toBe(4)
 
-  expect(entorno.errores).toHaveLength(1)
-  expect(entorno.errores[0]?.meta?.perdidos).toBe(4)
-  expect(entorno.orden).toContain('cerrarBase')
+  expect(environment.errors).toHaveLength(1)
+  expect(environment.errors[0]?.meta?.lost).toBe(4)
+  expect(environment.order).toContain('closeDb')
 })
 
-test('reintenta el vaciado por lo que entró al buffer durante el anterior', async () => {
-  const entorno = crearEntorno({ pendientes: 2, tardios: 1 })
+test('retries the flush for what entered the buffer during the previous one', async () => {
+  const environment = createEnvironment({ pending: 2, late: 1 })
 
-  expect(await entorno.shutdown.apagar()).toBe(0)
+  expect(await environment.shutdown.shutDown()).toBe(0)
 
-  expect(entorno.orden).toEqual([
-    'cortarReintento',
-    'desconectar',
-    'vaciar',
-    'vaciar',
-    'cerrarBase',
+  expect(environment.order).toEqual([
+    'stopRetries',
+    'disconnect',
+    'flush',
+    'flush',
+    'closeDb',
   ])
   expect(
-    entorno.infos.find((linea) => linea.meta?.persistidos !== undefined)?.meta?.persistidos,
+    environment.infos.find((line) => line.meta?.persisted !== undefined)?.meta?.persisted,
   ).toBe(3)
-  expect(entorno.errores).toHaveLength(0)
+  expect(environment.errors).toHaveLength(0)
 })
 
-test('avisa cuántos mensajes se pierden si el vaciado falla', async () => {
-  const entorno = crearEntorno({ pendientes: 2, fallaVaciado: new Error('base caída') })
+test('reports how many messages are lost if the flush fails', async () => {
+  const environment = createEnvironment({ pending: 2, flushError: new Error('database down') })
 
-  expect(await entorno.shutdown.apagar()).toBe(2)
+  expect(await environment.shutdown.shutDown()).toBe(2)
 
-  expect(entorno.errores).toHaveLength(1)
-  expect(entorno.errores[0]?.meta?.perdidos).toBe(2)
-  expect(entorno.errores[0]?.meta?.error).toBe('base caída')
-  expect(entorno.orden).toEqual(['cortarReintento', 'desconectar', 'vaciar', 'cerrarBase'])
+  expect(environment.errors).toHaveLength(1)
+  expect(environment.errors[0]?.meta?.lost).toBe(2)
+  expect(environment.errors[0]?.meta?.error).toBe('database down')
+  expect(environment.order).toEqual(['stopRetries', 'disconnect', 'flush', 'closeDb'])
 })
 
-test('dos señales seguidas apagan una sola vez', async () => {
-  const entorno = crearEntorno()
+test('two consecutive signals shut down only once', async () => {
+  const environment = createEnvironment()
 
-  await Promise.all([entorno.shutdown.apagar(), entorno.shutdown.apagar()])
-  await entorno.shutdown.apagar()
+  await Promise.all([environment.shutdown.shutDown(), environment.shutdown.shutDown()])
+  await environment.shutdown.shutDown()
 
-  expect(entorno.orden.filter((paso) => paso === 'vaciar')).toHaveLength(1)
-  expect(entorno.orden.filter((paso) => paso === 'desconectar')).toHaveLength(1)
-  expect(entorno.orden.filter((paso) => paso === 'cerrarBase')).toHaveLength(1)
+  expect(environment.order.filter((step) => step === 'flush')).toHaveLength(1)
+  expect(environment.order.filter((step) => step === 'disconnect')).toHaveLength(1)
+  expect(environment.order.filter((step) => step === 'closeDb')).toHaveLength(1)
 })
 
-test('enCurso queda en alto desde que arranca el apagado', async () => {
-  const entorno = crearEntorno()
+test('inProgress stays true from the moment shutdown starts', async () => {
+  const environment = createEnvironment()
 
-  expect(entorno.shutdown.enCurso).toBe(false)
-  const apagado = entorno.shutdown.apagar()
-  expect(entorno.shutdown.enCurso).toBe(true)
+  expect(environment.shutdown.inProgress).toBe(false)
+  const shuttingDown = environment.shutdown.shutDown()
+  expect(environment.shutdown.inProgress).toBe(true)
 
-  await apagado
+  await shuttingDown
 
-  // Sigue en alto después de terminar: un rechazo que llega tarde también es consecuencia suya.
-  expect(entorno.shutdown.enCurso).toBe(true)
+  // Still true after finishing: a late rejection is also a consequence of it.
+  expect(environment.shutdown.inProgress).toBe(true)
 })
 
-test('cierra la base aunque falle la desconexión del proveedor', async () => {
-  const entorno = crearEntorno({ fallaDesconexion: new Error('socket colgado') })
+test('closes the database even if provider disconnect fails', async () => {
+  const environment = createEnvironment({ disconnectError: new Error('socket hung') })
 
-  await entorno.shutdown.apagar()
+  await environment.shutdown.shutDown()
 
-  expect(entorno.orden).toContain('cerrarBase')
-  expect(entorno.errores.some((linea) => linea.meta?.error === 'socket colgado')).toBe(true)
+  expect(environment.order).toContain('closeDb')
+  expect(environment.errors.some((line) => line.meta?.error === 'socket hung')).toBe(true)
 })
 
-test('termina el apagado aunque falle el cierre de la base', async () => {
-  const entorno = crearEntorno({ fallaCierreBase: new Error('pool ocupado') })
+test('finishes shutdown even if closing the database fails', async () => {
+  const environment = createEnvironment({ closeDbError: new Error('pool busy') })
 
-  await entorno.shutdown.apagar()
+  await environment.shutdown.shutDown()
 
-  expect(entorno.errores.some((linea) => linea.meta?.error === 'pool ocupado')).toBe(true)
-  expect(entorno.infos.some((linea) => linea.message === 'apagado completo')).toBe(true)
+  expect(environment.errors.some((line) => line.meta?.error === 'pool busy')).toBe(true)
+  expect(environment.infos.some((line) => line.message === 'shutdown complete')).toBe(true)
 })
 
-test('un aviso roto no se reporta como pérdida ni interrumpe el apagado', async () => {
-  const entorno = crearEntorno({
-    pendientes: 5,
-    irrecuperables: 4,
-    fallaAviso: new Error('stdout cerrado'),
+test('a broken notice is not reported as loss and does not interrupt shutdown', async () => {
+  const environment = createEnvironment({
+    pending: 5,
+    unrecoverable: 4,
+    logError: new Error('stdout closed'),
   })
 
-  // El aviso rompe entre medir la pérdida y devolverla: si el apagado la soltara ahí, saldría
-  // con cero después de tirar cuatro mensajes.
-  expect(await entorno.shutdown.apagar()).toBe(4)
+  // The notice breaks between measuring the loss and returning it: if shutdown threw
+  // there, it would exit with zero after dropping four messages.
+  expect(await environment.shutdown.shutDown()).toBe(4)
 
-  expect(entorno.errores.some((linea) => linea.message.includes('falló el vaciado'))).toBe(false)
-  expect(entorno.errores.some((linea) => linea.meta?.error === 'stdout cerrado')).toBe(true)
-  expect(entorno.orden).toEqual([
-    'cortarReintento',
-    'desconectar',
-    'vaciar',
-    'vaciar',
-    'cerrarBase',
+  expect(environment.errors.some((line) => line.message.includes('buffer flush failed'))).toBe(
+    false,
+  )
+  expect(environment.errors.some((line) => line.meta?.error === 'stdout closed')).toBe(true)
+  expect(environment.order).toEqual([
+    'stopRetries',
+    'disconnect',
+    'flush',
+    'flush',
+    'closeDb',
   ])
 })
 
-test('una causa circular no borra la cuenta de mensajes perdidos', async () => {
-  // `describirError` recorre la cadena de causas para armar la línea de log: si desborda la
-  // pila, el fallo se lleva puesto el número que decide el código de salida.
-  const arriba = new Error('base caída')
-  arriba.cause = new Error('socket roto', { cause: arriba })
-  const entorno = crearEntorno({ pendientes: 4, fallaVaciado: arriba })
+test('a circular cause does not erase the lost message count', async () => {
+  // `describeError` walks the cause chain to build the log line: if it overflows the
+  // stack, the failure takes with it the number that decides the exit code.
+  const top = new Error('database down')
+  top.cause = new Error('socket broken', { cause: top })
+  const environment = createEnvironment({ pending: 4, flushError: top })
 
-  expect(await entorno.shutdown.apagar()).toBe(4)
+  expect(await environment.shutdown.shutDown()).toBe(4)
 
-  expect(entorno.orden).toContain('cerrarBase')
+  expect(environment.order).toContain('closeDb')
 })

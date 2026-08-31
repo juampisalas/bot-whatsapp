@@ -4,7 +4,7 @@ export class BoundedBuffer<T> {
 
   constructor(private readonly limit: number) {
     if (!Number.isInteger(limit) || limit <= 0) {
-      throw new Error('El límite del buffer debe ser un entero positivo')
+      throw new Error('Buffer limit must be a positive integer')
     }
   }
 

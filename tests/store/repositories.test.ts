@@ -2,7 +2,8 @@ import { test, expect, beforeAll, afterAll } from 'bun:test'
 import { eq } from 'drizzle-orm'
 import { createDb } from '../../src/store/client.ts'
 import { runMigrations } from '../../src/store/migrate.ts'
-import { conversations, participants } from '../../src/store/schema.ts'
+import { attachments, conversations, participants } from '../../src/store/schema.ts'
+import { insertAttachments } from '../../src/store/repositories/attachments.ts'
 import { upsertConversation, upsertParticipant } from '../../src/store/repositories/conversations.ts'
 import { countMessagesInConversation, insertMessage } from '../../src/store/repositories/messages.ts'
 
@@ -260,4 +261,55 @@ test('insertMessage revierte el insert si falla la actualización de actividad',
   const causa = (fallo as { cause?: { message?: string } } | null)?.cause
   expect(causa?.message).toBe('forced activity update failure')
   expect(await countMessagesInConversation(handle.db, conversationId)).toBe(0)
+})
+
+test('insertAttachments on conflict fills null mimeType and sizeBytes from a later delivery', async () => {
+  const conversationId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'conversation-attachment-enrichment',
+    kind: 'dm',
+    name: null,
+  })
+  const { id: messageId } = await insertMessage(handle.db, {
+    provider: 'fake',
+    externalId: 'message-attachment-enrichment',
+    conversationId,
+    participantId: null,
+    sentAt: new Date('2026-08-30T17:00:00Z'),
+    fromSelf: false,
+    text: null,
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  })
+
+  await insertAttachments(handle.db, messageId, [
+    {
+      externalId: 'att-enrich',
+      kind: 'image',
+      mimeType: null,
+      sizeBytes: null,
+      durationMs: null,
+    },
+  ])
+  await insertAttachments(handle.db, messageId, [
+    {
+      externalId: 'att-enrich',
+      kind: 'image',
+      mimeType: 'image/jpeg',
+      sizeBytes: 2048,
+      durationMs: null,
+    },
+  ])
+
+  const rows = await handle.db
+    .select({
+      mimeType: attachments.mimeType,
+      sizeBytes: attachments.sizeBytes,
+    })
+    .from(attachments)
+    .where(eq(attachments.messageId, messageId))
+
+  expect(rows).toEqual([{ mimeType: 'image/jpeg', sizeBytes: 2048 }])
 })

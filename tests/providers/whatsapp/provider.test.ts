@@ -169,7 +169,7 @@ test('disconnect durante setup invalida y cierra el socket tardío', async () =>
       { text: 'hola' },
       'late-send',
     ),
-  ).rejects.toThrow('Se cerró la conexión antes de estar lista')
+  ).rejects.toThrow('connection closed before it was ready')
 })
 
 test('un setup fallido durante reconnect se reintenta hasta crear un socket', async () => {
@@ -247,9 +247,9 @@ test('logout queda terminal para readiness y operaciones posteriores', async () 
   await adapter.disconnect()
 
   expect(readinessBeforeDisconnect).toBe(
-    'La sesión de WhatsApp fue cerrada desde el teléfono',
+    'WhatsApp session was closed from the phone',
   )
-  expect(sendOutcome).toBe('La sesión de WhatsApp fue cerrada desde el teléfono')
+  expect(sendOutcome).toBe('WhatsApp session was closed from the phone')
 })
 
 function waMessageDePrueba(id: string, fromMe = false): unknown {
@@ -330,7 +330,7 @@ test('un logout avisa por el canal de fallo terminal', async () => {
   socket.emitOpen()
   socket.emitClose(DisconnectReason.loggedOut)
 
-  expect(fatales).toEqual(['La sesión de WhatsApp fue cerrada desde el teléfono'])
+  expect(fatales).toEqual(['WhatsApp session was closed from the phone'])
 })
 
 test('una caída recuperable no avisa como fallo terminal', async () => {
@@ -376,14 +376,14 @@ test('un manejador de fallo terminal que rompe no se lleva puesto el cierre', as
   socket.emitOpen()
   socket.emitClose(DisconnectReason.loggedOut)
 
-  await expect(adapter.waitUntilReady()).rejects.toThrow(
-    'La sesión de WhatsApp fue cerrada desde el teléfono',
+  await expect(adapter.waitUntilReady(10_000)).rejects.toThrow(
+    'WhatsApp session was closed from the phone',
   )
 })
 
 test('waitUntilReady rechaza cuando vence el tiempo', async () => {
   await expect(provider().waitUntilReady(5)).rejects.toThrow(
-    'La conexión no estuvo lista en 5 ms',
+    'connection was not ready within 5 ms',
   )
 })
 
@@ -393,7 +393,7 @@ test('disconnect rechaza una espera pendiente', async () => {
 
   await adapter.disconnect()
 
-  await expect(pending).rejects.toThrow('Se cerró la conexión antes de estar lista')
+  await expect(pending).rejects.toThrow('connection closed before it was ready')
 })
 
 test('send falla claramente si no hay conexión', async () => {
@@ -403,11 +403,13 @@ test('send falla claramente si no hay conexión', async () => {
       { text: 'hola' },
       'message-id',
     ),
-  ).rejects.toThrow('WhatsAppProvider sin conectar')
+  ).rejects.toThrow('WhatsAppProvider is not connected')
 })
 
 test('listConversations falla claramente si no hay conexión', async () => {
-  await expect(provider().listConversations()).rejects.toThrow('WhatsAppProvider sin conectar')
+  await expect(provider().listConversations()).rejects.toThrow(
+    'WhatsAppProvider is not connected',
+  )
 })
 
 const directoriosDeMedios: string[] = []

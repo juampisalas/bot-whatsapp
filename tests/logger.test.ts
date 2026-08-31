@@ -1,88 +1,88 @@
 import { expect, test } from 'bun:test'
-import { describirError } from '../src/domain/logger.ts'
+import { describeError } from '../src/domain/logger.ts'
 import { createLogger } from '../src/logger.ts'
 
-function capturarLineas(escribir: () => void): string[] {
-  const lineas: string[] = []
+function captureLines(write: () => void): string[] {
+  const lines: string[] = []
   const original = console.log
-  console.log = (linea: string) => lineas.push(linea)
+  console.log = (line: string) => lines.push(line)
   try {
-    escribir()
+    write()
   } finally {
     console.log = original
   }
-  return lineas
+  return lines
 }
 
-test('filtra por nivel', () => {
-  const lineas = capturarLineas(() => {
+test('filters by level', () => {
+  const lines = captureLines(() => {
     const log = createLogger('warn')
-    log.info('esto no se ve')
-    log.warn('esto sí')
+    log.info('this is hidden')
+    log.warn('this shows')
   })
 
-  expect(lineas).toHaveLength(1)
-  expect(lineas[0]).toContain('esto sí')
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('this shows')
 })
 
-test('error se emite en el nivel más alto', () => {
-  const lineas = capturarLineas(() => {
+test('error is emitted at the highest level', () => {
+  const lines = captureLines(() => {
     const log = createLogger('error')
-    log.warn('esto no se ve')
-    log.error('se cayó')
+    log.warn('this is hidden')
+    log.error('it crashed')
   })
 
-  expect(lineas).toHaveLength(1)
-  expect(lineas[0]).toContain('ERROR')
-  expect(lineas[0]).toContain('se cayó')
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('ERROR')
+  expect(lines[0]).toContain('it crashed')
 })
 
-test('incluye los metadatos como JSON', () => {
-  const lineas = capturarLineas(() => {
-    createLogger('info').info('hola', { a: 1 })
+test('includes metadata as JSON', () => {
+  const lines = captureLines(() => {
+    createLogger('info').info('hello', { a: 1 })
   })
 
-  expect(lineas[0]).toContain('{"a":1}')
+  expect(lines[0]).toContain('{"a":1}')
 })
 
-test('omite los metadatos cuando no hay', () => {
-  const lineas = capturarLineas(() => {
-    createLogger('info').info('sin metadatos')
+test('omits metadata when there is none', () => {
+  const lines = captureLines(() => {
+    createLogger('info').info('no metadata')
   })
 
-  expect(lineas[0]).toEndWith('sin metadatos')
+  expect(lines[0]).toEndWith('no metadata')
 })
 
-test('describirError encadena la causa que el error de arriba no nombra', () => {
-  const causa = new Error('conexión rechazada')
-  const envoltorio = new Error('Failed query: select 1', { cause: causa })
+test('describeError chains the cause that the outer error does not name', () => {
+  const cause = new Error('conexión rechazada')
+  const wrapper = new Error('Failed query: select 1', { cause })
 
-  expect(describirError(envoltorio)).toBe('Failed query: select 1: conexión rechazada')
+  expect(describeError(wrapper)).toBe('Failed query: select 1: conexión rechazada')
 })
 
-test('describirError nombra por el código a la causa sin mensaje', () => {
-  // Los errores de red de node llegan con `message` vacío: sin el código no queda nada útil.
-  const causa = Object.assign(new Error(''), { code: 'ECONNREFUSED' })
+test('describeError names a message-less cause by its code', () => {
+  // Node network errors arrive with an empty `message`: without the code nothing useful remains.
+  const cause = Object.assign(new Error(''), { code: 'ECONNREFUSED' })
 
-  expect(describirError(new Error('Failed query', { cause: causa }))).toBe(
+  expect(describeError(new Error('Failed query', { cause }))).toBe(
     'Failed query: ECONNREFUSED',
   )
 })
 
-test('describirError no rompe con algo que no es un Error', () => {
-  expect(describirError('se cayó todo')).toBe('se cayó todo')
+test('describeError does not break on a non-Error value', () => {
+  expect(describeError('se cayó todo')).toBe('se cayó todo')
 })
 
-test('describirError corta una cadena de causas que se cierra en ciclo', () => {
-  const arriba = new Error('Failed query')
-  arriba.cause = new Error('conexión rechazada', { cause: arriba })
+test('describeError cuts a cause chain that closes in a cycle', () => {
+  const top = new Error('Failed query')
+  top.cause = new Error('conexión rechazada', { cause: top })
 
-  expect(describirError(arriba)).toBe('Failed query: conexión rechazada')
+  expect(describeError(top)).toBe('Failed query: conexión rechazada')
 })
 
-test('describirError corta un error que se nombra como su propia causa', () => {
-  const solo = new Error('se muerde la cola')
-  solo.cause = solo
+test('describeError cuts an error that names itself as its own cause', () => {
+  const alone = new Error('se muerde la cola')
+  alone.cause = alone
 
-  expect(describirError(solo)).toBe('se muerde la cola')
+  expect(describeError(alone)).toBe('se muerde la cola')
 })

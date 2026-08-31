@@ -1,18 +1,18 @@
 import type { Config } from './config/index.ts'
 import type { Logger } from './domain/logger.ts'
 
-const orden = { info: 20, warn: 30, error: 40 } as const
+const levels = { info: 20, warn: 30, error: 40 } as const
 
 export function createLogger(level: Config['LOG_LEVEL']): Logger {
-  const minimo = orden[level]
+  const minimum = levels[level]
 
-  const emitir =
-    (nivel: keyof typeof orden) =>
+  const emit =
+    (current: keyof typeof levels) =>
     (message: string, meta?: Record<string, unknown>): void => {
-      if (orden[nivel] < minimo) return
-      const sufijo = meta ? ` ${JSON.stringify(meta)}` : ''
-      console.log(`${new Date().toISOString()} ${nivel.toUpperCase()} ${message}${sufijo}`)
+      if (levels[current] < minimum) return
+      const suffix = meta ? ` ${JSON.stringify(meta)}` : ''
+      console.log(`${new Date().toISOString()} ${current.toUpperCase()} ${message}${suffix}`)
     }
 
-  return { info: emitir('info'), warn: emitir('warn'), error: emitir('error') }
+  return { info: emit('info'), warn: emit('warn'), error: emit('error') }
 }

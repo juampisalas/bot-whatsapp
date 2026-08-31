@@ -16,6 +16,8 @@ export function handlePostgresNotice(notice: postgres.Notice): void {
 export function createDb(connectionString: string) {
   const sql = postgres(connectionString, {
     max: 10,
+    // Abort hung statements so shutdown / buffer flush cannot wait forever on a black-holed DB.
+    connection: { statement_timeout: 15_000 },
     onnotice: handlePostgresNotice,
   })
   const db = drizzle(sql, { schema })

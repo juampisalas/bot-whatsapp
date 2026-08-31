@@ -10,19 +10,27 @@ export async function insertAttachments(
 ): Promise<void> {
   if (items.length === 0) return
 
-  await db
-    .insert(attachments)
-    .values(
-      items.map((item) => ({
+  for (const item of items) {
+    await db
+      .insert(attachments)
+      .values({
         messageId,
         externalId: item.externalId,
         kind: item.kind,
         mimeType: item.mimeType,
         sizeBytes: item.sizeBytes,
         durationMs: item.durationMs,
-      })),
-    )
-    .onConflictDoNothing({ target: [attachments.messageId, attachments.externalId] })
+      })
+      .onConflictDoUpdate({
+        target: [attachments.messageId, attachments.externalId],
+        set: {
+          kind: item.kind,
+          ...(item.mimeType === null ? {} : { mimeType: item.mimeType }),
+          ...(item.sizeBytes === null ? {} : { sizeBytes: item.sizeBytes }),
+          ...(item.durationMs === null ? {} : { durationMs: item.durationMs }),
+        },
+      })
+  }
 }
 
 export async function listAttachmentsToDownload(

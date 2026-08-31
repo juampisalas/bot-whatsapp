@@ -10,7 +10,7 @@ const schema = z.object({
   CONTROL_CONVERSATION_ID: z.string().optional(),
   CAPTURE_BUFFER_MAX: z.coerce.number().int().positive().default(1000),
   TIMEZONE: z.string().min(1).default('America/Argentina/Buenos_Aires'),
-  // Los niveles son los que el Logger sabe emitir. Uno nuevo entra junto con su emisor, no antes.
+  // Levels the Logger can emit. A new one arrives together with its emitter, not before.
   LOG_LEVEL: z.enum(['info', 'warn', 'error']).default('info'),
 })
 
@@ -22,7 +22,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     const detail = parsed.error.issues
       .map((issue) => `  ${issue.path.join('.') || '(raíz)'}: ${issue.message}`)
       .join('\n')
-    throw new Error(`Configuración de entorno inválida:\n${detail}`)
+    throw new Error(`Invalid environment configuration:\n${detail}`)
   }
   return parsed.data
 }

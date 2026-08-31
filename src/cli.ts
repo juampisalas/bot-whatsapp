@@ -1,25 +1,25 @@
 export type Command = 'run' | 'list-conversations'
 
-// Mapa en lugar de lista para que el guard y el mensaje de error salgan de la misma fuente.
-const COMANDOS: Record<Command, true> = {
+// Map instead of a list so the type guard and the error message share one source.
+const COMMANDS: Record<Command, true> = {
   run: true,
   'list-conversations': true,
 }
 
-function esComando(valor: string): valor is Command {
-  return Object.hasOwn(COMANDOS, valor)
+function isCommand(value: string): value is Command {
+  return Object.hasOwn(COMMANDS, value)
 }
 
 /**
- * Sin subcomando corre la captura. Cualquier token que no sea un comando
- * conocido falla: si cayera en el camino por defecto, un `lst-conversations`
- * con un dedazo arrancaría el bot en modo captura sin decir nada.
+ * With no subcommand, run capture. Any unknown token fails: falling through to the
+ * default would let a typo like `lst-conversations` start the bot in capture mode
+ * with no warning.
  */
 export function parseCommand(argv: readonly string[]): Command {
-  const [subcomando] = argv
-  if (subcomando === undefined) return 'run'
-  if (esComando(subcomando)) return subcomando
+  const [subcommand] = argv
+  if (subcommand === undefined) return 'run'
+  if (isCommand(subcommand)) return subcommand
 
-  const validos = Object.keys(COMANDOS).join(', ')
-  throw new Error(`Subcomando desconocido: ${subcomando}. Comandos válidos: ${validos}`)
+  const valid = Object.keys(COMMANDS).join(', ')
+  throw new Error(`Unknown subcommand: ${subcommand}. Valid commands: ${valid}`)
 }

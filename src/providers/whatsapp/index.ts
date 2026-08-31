@@ -10,8 +10,13 @@ import makeWASocket, {
   type WASocket,
 } from 'baileys'
 import qrcode from 'qrcode-terminal'
-import { describirError, silentLogger, type Logger } from '../../domain/logger.ts'
-import type { FatalHandler, InboundHandler, MessagingProvider } from '../../domain/provider.ts'
+import { describeError, silentLogger, type Logger } from '../../domain/logger.ts'
+import type {
+  ConversationMetaHandler,
+  FatalHandler,
+  InboundHandler,
+  MessagingProvider,
+} from '../../domain/provider.ts'
 import type {
   ConversationRef,
   ConversationSummary,
@@ -24,7 +29,10 @@ import type {
 import { createBaileysLogger } from './baileys-logger.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
-/** Los bytes de un adjunto, ya resueltos a partir de la carga original de baileys. */
+const DISPATCH_DRAIN_TIMEOUT_MS = 10_000
+const DEFAULT_READY_TIMEOUT_MS = 600_000
+
+/** Attachment bytes already resolved from the original baileys payload. */
 export type MediaDownloader = (message: WAMessage) => Promise<Uint8Array>
 
 export interface WhatsAppProviderOptions {
@@ -32,29 +40,30 @@ export interface WhatsAppProviderOptions {
   mediaDir: string
   log?: Logger
   socketFactory?: () => WASocket | Promise<WASocket>
-  /** Se inyecta por la misma razón que `socketFactory`: probar sin salir a la red. */
+  /** Injected for the same reason as `socketFactory`: test without hitting the network. */
   downloadMedia?: MediaDownloader
 }
 
-/** Los JIDs traen `:` para el dispositivo, y ninguno de los dos separadores va en un nombre. */
-function saneadoParaRuta(valor: string): string {
-  return valor.replace(/[/:]/g, '_')
+/** JIDs include `:` for the device, and neither separator belongs in a filename. */
+function sanitizePathSegment(value: string): string {
+  return value.replace(/[/:]/g, '_')
 }
 
 /**
- * Extensión a partir del mimetype que ya viene en el adjunto, solo cuando el subtipo es
- * corto y alfanumérico. Los mimetypes largos de Office no dan una extensión utilizable, y
- * el nombre sin extensión es preferible a uno con un subtipo entero pegado.
+ * Extension from the mimetype already present on the attachment, only when the subtype is
+ * short and alphanumeric. Long Office mimetypes do not yield a usable extension, and a
+ * bare name is preferable to one with a whole subtype glued on.
  */
-function extensionDeMime(mimeType: string | null): string {
-  const subtipo = mimeType?.split(';')[0]?.split('/')[1]?.trim() ?? ''
-  return /^[a-z0-9]{1,8}$/i.test(subtipo) ? `.${subtipo}` : ''
+function extensionFromMime(mimeType: string | null): string {
+  const subtype = mimeType?.split(';')[0]?.split('/')[1]?.trim() ?? ''
+  return /^[a-z0-9]{1,8}$/i.test(subtype) ? `.${subtype}` : ''
 }
 
 interface ReadyWaiter {
   resolve: () => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
+  timeoutMs: number
 }
 
 type ConnectionState =
@@ -71,6 +80,7 @@ export class WhatsAppProvider implements MessagingProvider {
   private socket: WASocket | null = null
   private handler: InboundHandler | null = null
   private fatalHandler: FatalHandler | null = null
+  private conversationMetaHandler: ConversationMetaHandler | null = null
   private state: ConnectionState = 'idle'
   private terminalError: Error | null = null
   private generation = 0
@@ -78,7 +88,8 @@ export class WhatsAppProvider implements MessagingProvider {
   private cancelReconnectDelay: (() => void) | null = null
   private reconnectDelayMs = 1_000
   private readonly readyWaiters: ReadyWaiter[] = []
-  private readonly despachosEnVuelo = new Set<Promise<void>>()
+  private readonly inFlightDispatches = new Set<Promise<void>>()
+  private readonly groupNames = new Map<string, string>()
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
 
@@ -94,12 +105,16 @@ export class WhatsAppProvider implements MessagingProvider {
     this.fatalHandler = handler
   }
 
-  /** El aviso corre dentro de un evento de baileys: si rompe, el cierre tiene que seguir. */
+  onConversationMeta(handler: ConversationMetaHandler): void {
+    this.conversationMetaHandler = handler
+  }
+
+  /** The notice runs inside a baileys event: if it throws, shutdown must still continue. */
   private emitFatal(error: Error): void {
     try {
       this.fatalHandler?.(error)
-    } catch (fallo) {
-      this.log.error('falló el aviso de fallo terminal', { error: describirError(fallo) })
+    } catch (failure) {
+      this.log.error('terminal failure notice threw', { error: describeError(failure) })
     }
   }
 
@@ -113,8 +128,7 @@ export class WhatsAppProvider implements MessagingProvider {
       return this.connect()
     }
 
-    // El logout es terminal hasta que un intento explícito avise que las credenciales
-    // se arreglaron.
+    // Logout is terminal until an explicit attempt signals that credentials were fixed.
     this.terminalError = null
     this.state = 'connecting'
     const task = this.runExplicitConnect()
@@ -174,8 +188,8 @@ export class WhatsAppProvider implements MessagingProvider {
     socket.ev.on('creds.update', () => {
       if (!this.isCurrentSocket(socket, generation)) return
       void saveCreds().catch((error: unknown) => {
-        this.log.error('no se pudieron guardar las credenciales de WhatsApp', {
-          error: describirError(error),
+        this.log.error('could not save WhatsApp credentials', {
+          error: describeError(error),
         })
       })
     })
@@ -183,15 +197,17 @@ export class WhatsAppProvider implements MessagingProvider {
     socket.ev.on('connection.update', (update) => {
       if (!this.isCurrentSocket(socket, generation)) return
       if (update.qr) {
-        this.log.info('escaneá este QR desde WhatsApp en Dispositivos vinculados')
-        // Baileys entrega solo la carga del QR: vincular el dispositivo exige dibujarlo.
+        this.log.info('scan this QR from WhatsApp → Linked devices')
+        this.bumpReadyWaiters()
+        // Baileys only delivers the QR payload: linking the device requires drawing it.
         qrcode.generate(update.qr, { small: true })
       }
       if (update.connection === 'open') {
         this.reconnectDelayMs = 1_000
         this.state = 'open'
         this.settleReadyWaiters()
-        this.log.info('conexión establecida con WhatsApp')
+        this.log.info('WhatsApp connection established')
+        void this.refreshGroupNames(socket)
       }
       if (update.connection === 'close') {
         this.handleClose(socket, generation, update.lastDisconnect?.error)
@@ -200,33 +216,76 @@ export class WhatsAppProvider implements MessagingProvider {
 
     socket.ev.on('messages.upsert', ({ messages }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      this.seguirDespacho(this.dispatch(messages, socket))
+      this.trackDispatch(this.dispatch(messages, socket))
     })
 
     socket.ev.on('messaging-history.set', ({ messages }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      this.seguirDespacho(this.dispatch(messages, socket))
+      this.trackDispatch(this.dispatch(messages, socket))
+    })
+
+    socket.ev.on('groups.upsert', (groups) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      for (const group of groups) {
+        this.applyGroupName(group.id, group.subject)
+      }
+    })
+
+    socket.ev.on('groups.update', (updates) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      for (const update of updates) {
+        const id = update.id
+        if (!id || update.subject === undefined) continue
+        this.applyGroupName(id, update.subject)
+      }
     })
   }
 
+  private applyGroupName(id: string, subject: string): void {
+    this.groupNames.set(id, subject)
+    void this.conversationMetaHandler?.({
+      externalId: id,
+      kind: 'group',
+      name: subject ?? null,
+    })
+  }
+
+  private async refreshGroupNames(socket: WASocket): Promise<void> {
+    try {
+      const groups = await socket.groupFetchAllParticipating()
+      for (const group of Object.values(groups)) {
+        this.groupNames.set(group.id, group.subject)
+        void this.conversationMetaHandler?.({
+          externalId: group.id,
+          kind: 'group',
+          name: group.subject ?? null,
+        })
+      }
+    } catch (error) {
+      this.log.error('failed to refresh WhatsApp group names', {
+        error: describeError(error),
+      })
+    }
+  }
+
   /**
-   * Anota el despacho para que `disconnect` lo espere. Sin esto, un mensaje que llega
-   * junto con la señal sigue corriendo mientras el apagado cierra la base: su
-   * persistencia falla, cae al buffer, y ese buffer ya nadie lo vacía.
+   * Tracks the dispatch so `disconnect` can wait for it. Without this, a message that
+   * arrives alongside the shutdown signal keeps running while shutdown closes the
+   * database: its persistence fails, falls to the buffer, and nobody drains that buffer.
    */
-  private seguirDespacho(despacho: Promise<void>): void {
-    // El seguimiento absorbe el rechazo: quien espera es el apagado, y ahí un fallo de
-    // despacho no debería impedir cerrar los recursos.
-    const seguimiento = despacho
+  private trackDispatch(dispatch: Promise<void>): void {
+    // Tracking absorbs rejection: shutdown is the waiter, and a dispatch failure must
+    // not block releasing resources.
+    const tracked = dispatch
       .catch((error: unknown) => {
-        this.log.error('falló el despacho de mensajes entrantes', {
-          error: describirError(error),
+        this.log.error('inbound message dispatch failed', {
+          error: describeError(error),
         })
       })
       .finally(() => {
-        this.despachosEnVuelo.delete(seguimiento)
+        this.inFlightDispatches.delete(tracked)
       })
-    this.despachosEnVuelo.add(seguimiento)
+    this.inFlightDispatches.add(tracked)
   }
 
   private async createSocket(): Promise<{
@@ -254,7 +313,7 @@ export class WhatsAppProvider implements MessagingProvider {
     return { socket, saveCreds }
   }
 
-  async waitUntilReady(timeoutMs = 120_000): Promise<void> {
+  async waitUntilReady(timeoutMs = DEFAULT_READY_TIMEOUT_MS): Promise<void> {
     if (this.state === 'open') return
     if (this.terminalError) throw this.terminalError
     await new Promise<void>((resolve, reject) => {
@@ -264,11 +323,25 @@ export class WhatsAppProvider implements MessagingProvider {
         if (index === -1) return
         this.readyWaiters.splice(index, 1)
         clearTimeout(waiter.timer)
-        reject(new Error(`La conexión no estuvo lista en ${timeoutMs} ms`))
+        reject(new Error(`connection was not ready within ${timeoutMs} ms`))
       }, timeoutMs)
-      waiter = { resolve, reject, timer }
+      waiter = { resolve, reject, timer, timeoutMs }
       this.readyWaiters.push(waiter)
     })
+  }
+
+  /** Resets each waiter's timer so a later QR does not expire on the first QR's clock. */
+  private bumpReadyWaiters(): void {
+    for (const waiter of this.readyWaiters) {
+      clearTimeout(waiter.timer)
+      waiter.timer = setTimeout(() => {
+        const index = this.readyWaiters.indexOf(waiter)
+        if (index === -1) return
+        this.readyWaiters.splice(index, 1)
+        clearTimeout(waiter.timer)
+        waiter.reject(new Error(`connection was not ready within ${waiter.timeoutMs} ms`))
+      }, waiter.timeoutMs)
+    }
   }
 
   private settleReadyWaiters(error?: Error): void {
@@ -281,24 +354,32 @@ export class WhatsAppProvider implements MessagingProvider {
 
   private async dispatch(waMessages: readonly WAMessage[], socket: WASocket): Promise<void> {
     const handler = this.handler
-    const propio = socket.user?.id
-    if (!handler || !propio) return
+    const ownId = socket.user?.id
+    if (!handler) return
+    if (!ownId) {
+      this.log.error('dropping inbound messages: baileys has not reported the own id yet', {
+        messages: waMessages.length,
+      })
+      return
+    }
 
-    // Baileys reporta el id propio con el dispositivo que salió del pair-success
-    // (`<numero>:<device>@s.whatsapp.net`). Sin sacárselo, los mensajes propios quedan bajo
-    // un participante que no es el JID con el que te ven los demás, y cada revinculación
-    // estrena fila en `participants`.
-    const selfJid = jidNormalizedUser(propio)
+    // Baileys reports the own id with the device that came from pair-success
+    // (`<number>:<device>@s.whatsapp.net`). Without normalizing it, own messages land under
+    // a participant that is not the JID others see you as, and every re-link creates a new
+    // row in `participants`.
+    const selfJid = jidNormalizedUser(ownId)
 
     for (const raw of waMessages) {
-      const normalized = normalizeWAMessage(raw, selfJid)
+      const normalized = normalizeWAMessage(raw, selfJid, {
+        groupName: this.groupNames.get(raw.key?.remoteJid ?? '') ?? null,
+      })
       if (!normalized) continue
       try {
         await handler(normalized)
       } catch (error) {
-        this.log.error('el manejador falló con un mensaje entrante', {
+        this.log.error('inbound handler failed for a message', {
           externalId: normalized.externalId,
-          error: describirError(error),
+          error: describeError(error),
         })
       }
     }
@@ -315,15 +396,15 @@ export class WhatsAppProvider implements MessagingProvider {
     if (statusCode === DisconnectReason.loggedOut) {
       this.state = 'loggedOut'
       this.generation += 1
-      this.terminalError = new Error('La sesión de WhatsApp fue cerrada desde el teléfono')
+      this.terminalError = new Error('WhatsApp session was closed from the phone')
       this.log.error(
-        'la sesión se cerró desde el teléfono: borrá el directorio de credenciales y volvé a vincular',
+        'session closed from the phone: delete the credentials directory and re-link',
         { authDir: this.options.authDir },
       )
       this.settleReadyWaiters(this.terminalError)
-      // Último: quien escucha el fallo terminal suele responder apagando, y el apagado
-      // desconecta. Avisar antes dejaría a las esperas pendientes rechazando por la
-      // desconexión en vez de por el motivo real.
+      // Last: whoever listens for terminal failure often responds by shutting down, and
+      // shutdown disconnects. Notifying earlier would make pending waits reject for the
+      // disconnect instead of the real reason.
       this.emitFatal(this.terminalError)
       return
     }
@@ -353,7 +434,7 @@ export class WhatsAppProvider implements MessagingProvider {
     while (this.state === 'reconnecting') {
       const delay = this.reconnectDelayMs
       this.reconnectDelayMs = Math.min(delay * 2, 60_000)
-      this.log.warn('conexión caída, reintentando', { enMs: delay })
+      this.log.warn('connection dropped, retrying', { inMs: delay })
       await this.waitForReconnectDelay(delay)
       if (this.state !== 'reconnecting') return
 
@@ -362,8 +443,8 @@ export class WhatsAppProvider implements MessagingProvider {
         if (installed) return
       } catch (error) {
         if (this.state !== 'reconnecting') return
-        this.log.error('falló la preparación de la conexión de WhatsApp', {
-          error: describirError(error),
+        this.log.error('failed to prepare WhatsApp connection', {
+          error: describeError(error),
         })
       }
     }
@@ -386,14 +467,14 @@ export class WhatsAppProvider implements MessagingProvider {
     try {
       await socket.end(undefined)
     } catch (error) {
-      this.log.warn('falló el cierre del socket de WhatsApp', {
-        error: describirError(error),
+      this.log.warn('failed to end WhatsApp socket', {
+        error: describeError(error),
       })
     }
   }
 
   async disconnect(): Promise<void> {
-    const error = new Error('Se cerró la conexión antes de estar lista')
+    const error = new Error('connection closed before it was ready')
     this.generation += 1
     this.state = 'closed'
     this.terminalError = error
@@ -402,9 +483,14 @@ export class WhatsAppProvider implements MessagingProvider {
     const socket = this.socket
     this.socket = null
     if (socket) await this.endSocket(socket)
-    // Después de soltar el socket: la generación ya cambió, así que no entra ningún despacho
-    // nuevo y lo que queda acá es finito.
-    if (this.despachosEnVuelo.size > 0) await Promise.all([...this.despachosEnVuelo])
+    // After releasing the socket: generation already advanced, so no new dispatch enters
+    // and what remains here is finite — still capped so shutdown cannot hang forever.
+    if (this.inFlightDispatches.size > 0) {
+      await Promise.race([
+        Promise.all([...this.inFlightDispatches]),
+        new Promise<void>((resolve) => setTimeout(resolve, DISPATCH_DRAIN_TIMEOUT_MS)),
+      ])
+    }
   }
 
   async send(
@@ -425,20 +511,20 @@ export class WhatsAppProvider implements MessagingProvider {
     message: InboundMessage,
     attachmentExternalId: string,
   ): Promise<DownloadedMedia> {
-    const descargar =
+    const download =
       this.options.downloadMedia ??
       ((raw: WAMessage) => downloadMediaMessage(raw, 'buffer', {}))
-    const buffer = await descargar(message.raw as WAMessage)
+    const buffer = await download(message.raw as WAMessage)
 
     const mimeType =
-      message.attachments.find((adjunto) => adjunto.externalId === attachmentExternalId)
+      message.attachments.find((attachment) => attachment.externalId === attachmentExternalId)
         ?.mimeType ?? null
-    // El id de mensaje de WhatsApp es único dentro del chat, no entre chats: sin la
-    // conversación en la ruta, dos adjuntos homónimos de chats distintos se pisan el archivo.
+    // WhatsApp message ids are unique within a chat; conversation is in the path so same
+    // attachment ids from different chats do not collide on disk.
     const localPath = join(
       this.options.mediaDir,
-      saneadoParaRuta(message.conversation.externalId),
-      `${saneadoParaRuta(attachmentExternalId)}${extensionDeMime(mimeType)}`,
+      sanitizePathSegment(message.conversation.externalId),
+      `${sanitizePathSegment(attachmentExternalId)}${extensionFromMime(mimeType)}`,
     )
     await Bun.write(localPath, buffer)
     return { localPath, sizeBytes: buffer.byteLength }
@@ -446,16 +532,19 @@ export class WhatsAppProvider implements MessagingProvider {
 
   async listConversations(): Promise<ConversationSummary[]> {
     const groups = await this.usableSocket().groupFetchAllParticipating()
-    return Object.values(groups).map((group) => ({
-      externalId: group.id,
-      kind: 'group',
-      name: group.subject ?? null,
-      participantCount: group.participants?.length ?? null,
-    }))
+    return Object.values(groups).map((group) => {
+      this.groupNames.set(group.id, group.subject)
+      return {
+        externalId: group.id,
+        kind: 'group' as const,
+        name: group.subject ?? null,
+        participantCount: group.participants?.length ?? null,
+      }
+    })
   }
 
   private usableSocket(): WASocket {
     if (this.state === 'open' && this.socket) return this.socket
-    throw this.terminalError ?? new Error('WhatsAppProvider sin conectar')
+    throw this.terminalError ?? new Error('WhatsAppProvider is not connected')
   }
 }

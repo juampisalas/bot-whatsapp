@@ -1,5 +1,5 @@
 import type { Logger } from '../domain/logger.ts'
-import { describirError, silentLogger } from '../domain/logger.ts'
+import { describeError, silentLogger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
 import type { InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
@@ -60,7 +60,7 @@ export function createIngestPipeline(deps: IngestDeps) {
       raw: message.raw,
     })
 
-    // La escritura idempotente incondicional repara metadatos faltantes tras un commit parcial o una reentrega.
+    // Conditional upsert fills null metadata on redelivery without clobbering known values.
     await insertAttachments(deps.db, id, message.attachments)
     await downloadPendingAttachments(message, id)
   }
@@ -72,60 +72,59 @@ export function createIngestPipeline(deps: IngestDeps) {
       await persist(message)
     } catch (error) {
       buffer.push(message)
-      log.warn('no se pudo persistir, mensaje en buffer', {
+      log.warn('could not persist, message buffered', {
         externalId: message.externalId,
-        enBuffer: buffer.size,
-        descartados: buffer.dropped,
-        error: describirError(error),
+        buffered: buffer.size,
+        dropped: buffer.dropped,
+        error: describeError(error),
       })
     }
   }
 
-  async function vaciar(): Promise<number> {
-    const pendientes = buffer.drain()
-    const fallidos: InboundMessage[] = []
-    let persistidos = 0
+  async function drain(): Promise<number> {
+    const pending = buffer.drain()
+    const failed: InboundMessage[] = []
+    let persisted = 0
 
-    for (const message of pendientes) {
+    for (const message of pending) {
       try {
         await persist(message)
-        persistidos += 1
+        persisted += 1
       } catch {
-        fallidos.push(message)
+        failed.push(message)
       }
     }
 
-    const descartadosAntes = buffer.dropped
-    buffer.requeueFront(fallidos)
-    if (buffer.dropped > descartadosAntes) {
-      log.warn('buffer descartó mensajes al reintentar', {
-        enBuffer: buffer.size,
-        descartados: buffer.dropped,
+    const droppedBefore = buffer.dropped
+    buffer.requeueFront(failed)
+    if (buffer.dropped > droppedBefore) {
+      log.warn('buffer dropped messages while retrying', {
+        buffered: buffer.size,
+        dropped: buffer.dropped,
       })
     }
-    if (persistidos > 0) log.info('buffer vaciado', { persistidos })
-    return persistidos
+    if (persisted > 0) log.info('buffer flushed', { persisted })
+    return persisted
   }
 
-  // `vaciar` arranca drenando el buffer, así que mientras una corrida está en vuelo el
-  // buffer está vacío y `bufferSize` no dice la verdad: lo que esa corrida no logre
-  // persistir vuelve recién al reencolar. Esperar al vaciado en vuelo en vez de arrancar
-  // otro corre la lectura de `bufferSize` hasta después de ese reencolado, que es el
-  // único momento en que refleja lo que de verdad quedó sin persistir.
-  let enVuelo: Promise<number> | null = null
+  // `drain` starts by emptying the buffer, so while a run is in flight `bufferSize` lies:
+  // what that run fails to persist only returns on requeue. Waiting on the in-flight drain
+  // instead of starting another one moves the `bufferSize` read to after that requeue,
+  // which is the only moment it reflects what truly remains unpersisted.
+  let inFlight: Promise<number> | null = null
 
-  /** Reintenta lo acumulado y conserva para otro intento lo que aún falla. */
+  /** Retries what is queued and keeps for another attempt whatever still fails. */
   function flushBuffer(): Promise<number> {
-    enVuelo ??= vaciar().finally(() => {
-      enVuelo = null
+    inFlight ??= drain().finally(() => {
+      inFlight = null
     })
-    return enVuelo
+    return inFlight
   }
 
   return {
     handle,
     flushBuffer,
-    /** Lo que todavía no se pudo persistir: el apagado lo reporta como pérdida. */
+    /** Still unpersisted: shutdown reports this as loss. */
     get bufferSize(): number {
       return buffer.size
     },

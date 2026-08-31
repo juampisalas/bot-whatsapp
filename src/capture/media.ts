@@ -1,4 +1,4 @@
-import { describirError, type Logger } from '../domain/logger.ts'
+import { describeError, type Logger } from '../domain/logger.ts'
 import type { MessagingProvider } from '../domain/provider.ts'
 import type { DownloadedMedia, InboundMessage } from '../domain/types.ts'
 import type { Db } from '../store/client.ts'
@@ -15,8 +15,7 @@ export interface MediaDeps {
 }
 
 /**
- * El medio de WhatsApp expira; el tope evita reintentos perpetuos
- * durante las reentregas de mensajes históricos.
+ * WhatsApp media expires; the cap avoids perpetual retries during historical redeliveries.
  */
 export const MAX_DOWNLOAD_ATTEMPTS = 3
 
@@ -35,11 +34,11 @@ export function createMediaDownloader(deps: MediaDeps) {
     try {
       media = await deps.provider.downloadAttachment(message, externalId)
     } catch (error) {
-      // El detalle se persiste en la fila del adjunto: es lo único que va a quedar para
-      // entender por qué no bajó, así que tiene que traer la causa envuelta.
-      const detail = describirError(error)
+      // Detail is persisted on the attachment row: that is all that remains to explain a
+      // failed download, so it must include the wrapped cause.
+      const detail = describeError(error)
       await markAttachmentFailed(deps.db, messageId, externalId, detail)
-      deps.log?.warn('no se pudo descargar un adjunto', { externalId, error: detail })
+      deps.log?.warn('could not download an attachment', { externalId, error: detail })
       return
     }
     await markAttachmentDownloaded(deps.db, messageId, externalId, media.localPath, media.sizeBytes)

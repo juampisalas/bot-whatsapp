@@ -28,7 +28,7 @@ test('normaliza un mensaje de texto de grupo', () => {
   const result = normalizeWAMessage(waMessage(), SELF)
 
   expect(result).not.toBeNull()
-  expect(result?.externalId).toBe('ABC123')
+  expect(result?.externalId).toBe('120363000000000000@g.us:ABC123')
   expect(result?.text).toBe('hola gente')
   expect(result?.conversation.kind).toBe('group')
   expect(result?.conversation.externalId).toBe('120363000000000000@g.us')
@@ -173,7 +173,7 @@ test('detecta una respuesta de texto', () => {
     SELF,
   )
 
-  expect(result?.replyToExternalId).toBe('QUOTED-TEXT')
+  expect(result?.replyToExternalId).toBe('120363000000000000@g.us:QUOTED-TEXT')
 })
 
 test('detecta una respuesta enviada con una imagen', () => {
@@ -190,7 +190,7 @@ test('detecta una respuesta enviada con una imagen', () => {
     SELF,
   )
 
-  expect(result?.replyToExternalId).toBe('QUOTED-IMAGE')
+  expect(result?.replyToExternalId).toBe('120363000000000000@g.us:QUOTED-IMAGE')
 })
 
 test('desenvuelve mensajes de vista única', () => {
@@ -283,12 +283,12 @@ test('normaliza una nota de video con su respuesta citada', () => {
   expect(result?.text).toBe('nota de video')
   expect(result?.attachments).toEqual([
     {
-      externalId: 'ABC123:0',
+      externalId: '120363000000000000@g.us:ABC123:0',
       kind: 'video',
       mimeType: 'video/mp4',
       sizeBytes: 4096,
       durationMs: 12000,
     },
   ])
-  expect(result?.replyToExternalId).toBe('QUOTED-PTV')
+  expect(result?.replyToExternalId).toBe('120363000000000000@g.us:QUOTED-PTV')
 })

@@ -15,6 +15,13 @@
       "when": 1788132029625,
       "tag": "0001_nasty_major_mapleleaf",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788192389164,
+      "tag": "0002_shocking_ezekiel_stane",
+      "breakpoints": true
     }
   ]
 }

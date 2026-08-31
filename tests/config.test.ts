@@ -16,11 +16,15 @@ test('convierte CAPTURE_BUFFER_MAX a número', () => {
   expect(config.CAPTURE_BUFFER_MAX).toBe(25)
 })
 
-test('falla con mensaje explícito si falta DATABASE_URL', () => {
+test('fails with an explicit message if DATABASE_URL is missing', () => {
+  expect(() => loadConfig({})).toThrow(/Invalid environment configuration/)
   expect(() => loadConfig({})).toThrow(/DATABASE_URL/)
 })
 
-test('rechaza un proveedor desconocido', () => {
+test('rejects an unknown provider', () => {
+  expect(() => loadConfig({ ...base, PROVIDER: 'telegram' })).toThrow(
+    /Invalid environment configuration/,
+  )
   expect(() => loadConfig({ ...base, PROVIDER: 'telegram' })).toThrow(/PROVIDER/)
 })
 
