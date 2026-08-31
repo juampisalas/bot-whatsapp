@@ -1,29 +1,11 @@
-import type { MessageWithContextInfo, WAMessage, proto } from 'baileys'
+import { normalizeMessageContent } from 'baileys'
+import type { WAMessage, proto } from 'baileys'
 import type {
   AttachmentKind,
   ConversationKind,
   InboundAttachment,
   InboundMessage,
 } from '../../domain/types.ts'
-
-function unwrap(content: proto.IMessage | null | undefined): proto.IMessage | null {
-  let current = content ?? null
-
-  // Wrappers can be composed; the depth cap prevents malformed payloads from looping indefinitely.
-  for (let depth = 0; current && depth < 4; depth += 1) {
-    const inner =
-      current.ephemeralMessage?.message ??
-      current.viewOnceMessage?.message ??
-      current.viewOnceMessageV2?.message ??
-      current.documentWithCaptionMessage?.message ??
-      null
-
-    if (!inner) return current
-    current = inner
-  }
-
-  return current
-}
 
 function conversationKind(remoteJid: string): ConversationKind {
   if (remoteJid.endsWith('@g.us')) return 'group'
@@ -69,14 +51,14 @@ function mediaSpec(content: proto.IMessage): MediaSpec | null {
     }
   }
 
-  if (content.videoMessage) {
-    const message = content.videoMessage
+  const videoMessage = content.videoMessage ?? content.ptvMessage
+  if (videoMessage) {
     return {
       kind: 'video',
-      mimeType: message.mimetype ?? null,
-      sizeBytes: toBytes(message.fileLength),
-      durationMs: message.seconds ? message.seconds * 1000 : null,
-      caption: message.caption ?? null,
+      mimeType: videoMessage.mimetype ?? null,
+      sizeBytes: toBytes(videoMessage.fileLength),
+      durationMs: videoMessage.seconds ? videoMessage.seconds * 1000 : null,
+      caption: videoMessage.caption ?? null,
     }
   }
 
@@ -114,9 +96,10 @@ const NORMALIZED_CONTEXT_NODES = [
   'imageMessage',
   'audioMessage',
   'videoMessage',
+  'ptvMessage',
   'documentMessage',
   'stickerMessage',
-] as const satisfies readonly MessageWithContextInfo[]
+] as const satisfies readonly (keyof proto.IMessage)[]
 
 function replyToExternalId(content: proto.IMessage): string | null {
   for (const key of NORMALIZED_CONTEXT_NODES) {
@@ -135,7 +118,13 @@ export function normalizeWAMessage(
   const externalId = waMessage.key?.id
   if (!remoteJid || !externalId) return null
 
-  const content = unwrap(waMessage.message)
+  const timestampValue = waMessage.messageTimestamp
+  if (timestampValue === null || timestampValue === undefined) return null
+
+  const timestamp = Number(timestampValue)
+  if (!Number.isFinite(timestamp)) return null
+
+  const content = normalizeMessageContent(waMessage.message)
   if (!content) return null
 
   const media = mediaSpec(content)
@@ -149,6 +138,9 @@ export function normalizeWAMessage(
     : kind === 'group'
       ? (waMessage.key?.participant ?? null)
       : remoteJid
+  // pushName identifies the author, so it names a conversation only when that author is the DM contact.
+  const conversationName =
+    kind === 'dm' && !fromSelf ? (waMessage.pushName ?? null) : null
 
   const attachments: InboundAttachment[] = media
     ? [
@@ -162,15 +154,13 @@ export function normalizeWAMessage(
       ]
     : []
 
-  const timestamp = Number(waMessage.messageTimestamp ?? 0)
-
   return {
     provider: 'whatsapp',
     externalId,
     conversation: {
       externalId: remoteJid,
       kind,
-      name: kind === 'group' ? null : (waMessage.pushName ?? null),
+      name: conversationName,
     },
     sender: senderJid
       ? { externalId: senderJid, displayName: fromSelf ? null : (waMessage.pushName ?? null) }

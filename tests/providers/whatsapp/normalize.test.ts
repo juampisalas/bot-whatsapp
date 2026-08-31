@@ -12,7 +12,12 @@ function waMessage(overrides: Record<string, unknown> = {}): WAMessage {
       fromMe: false,
       participant: '5491111111111@s.whatsapp.net',
     },
-    messageTimestamp: 1788091200,
+    messageTimestamp: {
+      low: 1788091200,
+      high: 0,
+      unsigned: true,
+      toString: () => '1788091200',
+    },
     pushName: 'Ana',
     message: { conversation: 'hola gente' },
     ...overrides,
@@ -40,7 +45,21 @@ test('detecta una conversación uno a uno', () => {
   )
 
   expect(result?.conversation.kind).toBe('dm')
+  expect(result?.conversation.name).toBe('Ana')
   expect(result?.sender?.externalId).toBe('5491111111111@s.whatsapp.net')
+})
+
+test('no usa el nombre propio como nombre de una conversación saliente', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      key: { remoteJid: '5491111111111@s.whatsapp.net', id: 'X1-OUT', fromMe: true },
+      pushName: 'Mi Nombre',
+    }),
+    SELF,
+  )
+
+  expect(result?.conversation.name).toBeNull()
+  expect(result?.sender?.externalId).toBe(SELF)
 })
 
 test('marca fromSelf cuando el mensaje es propio', () => {
@@ -175,6 +194,22 @@ test('desenvuelve mensajes de vista única V2', () => {
   expect(result?.text).toBe('una vez V2')
 })
 
+test('desenvuelve mensajes de vista única V2 Extension', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        viewOnceMessageV2Extension: {
+          message: { imageMessage: { caption: 'extensión de vista única' } },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('extensión de vista única')
+  expect(result?.attachments[0]?.kind).toBe('image')
+})
+
 test('desenvuelve dos capas anidadas', () => {
   const result = normalizeWAMessage(
     waMessage({
@@ -197,4 +232,41 @@ test('desenvuelve dos capas anidadas', () => {
 
 test('devuelve null si una clave válida no tiene mensaje', () => {
   expect(normalizeWAMessage(waMessage({ message: undefined }), SELF)).toBeNull()
+})
+
+test('devuelve null si falta el timestamp', () => {
+  expect(normalizeWAMessage(waMessage({ messageTimestamp: undefined }), SELF)).toBeNull()
+})
+
+test('devuelve null si el timestamp no es numérico', () => {
+  expect(normalizeWAMessage(waMessage({ messageTimestamp: 'no-es-un-timestamp' }), SELF)).toBeNull()
+})
+
+test('normaliza una nota de video con su respuesta citada', () => {
+  const result = normalizeWAMessage(
+    waMessage({
+      message: {
+        ptvMessage: {
+          mimetype: 'video/mp4',
+          seconds: 12,
+          fileLength: 4096,
+          caption: 'nota de video',
+          contextInfo: { stanzaId: 'QUOTED-PTV' },
+        },
+      },
+    }),
+    SELF,
+  )
+
+  expect(result?.text).toBe('nota de video')
+  expect(result?.attachments).toEqual([
+    {
+      externalId: 'ABC123:0',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      sizeBytes: 4096,
+      durationMs: 12000,
+    },
+  ])
+  expect(result?.replyToExternalId).toBe('QUOTED-PTV')
 })
