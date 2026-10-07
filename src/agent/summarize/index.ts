@@ -120,7 +120,10 @@ export async function summarize(input: SummarizeInput): Promise<string> {
       derivations = await listDerivationsByAttachmentIds(
         db,
         rangeAttachments.map((attachment) => attachment.id),
-        media.model,
+        {
+          transcript: media.transcriptModel,
+          description: media.describeModel,
+        },
       )
     }
 

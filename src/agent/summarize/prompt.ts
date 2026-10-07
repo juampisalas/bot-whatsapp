@@ -1,7 +1,7 @@
 import type { ResolvedPreferences } from '../preferences.ts'
 
 /** Bump when partial or combo prompt text changes so cached chunks are invalidated. */
-export const SUMMARY_PROMPT_VERSION = 1
+export const SUMMARY_PROMPT_VERSION = 2
 
 const PARTIAL_TASK = 'Task: summarize one calendar day of messages.'
 const COMBO_TASK = 'Task: combine daily summaries into one overall summary.'

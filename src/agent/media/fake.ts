@@ -1,4 +1,4 @@
-import type { MediaModel } from './port.ts'
+import type { MediaModel, TranscribeOptions } from './port.ts'
 
 type QueuedItem = { text: string } | { error: Error }
 
@@ -6,20 +6,27 @@ export type FakeMediaCall = {
   method: 'transcribe' | 'describe'
   path: string
   mime: string | null
+  options?: TranscribeOptions
 }
 
 /**
  * Test double that returns pre-queued text (or errors) keyed by `localPath`.
  */
 export class FakeMediaModel implements MediaModel {
-  readonly model: string
+  readonly describeModel: string
+  readonly transcriptModel: string
   readonly calls: FakeMediaCall[] = []
 
   private readonly transcriptQueue = new Map<string, QueuedItem[]>()
   private readonly describeQueue = new Map<string, QueuedItem[]>()
 
   constructor(model = 'fake-media') {
-    this.model = model
+    this.describeModel = model
+    this.transcriptModel = model
+  }
+
+  get model(): string {
+    return this.describeModel
   }
 
   enqueueTranscript(localPath: string, text: string): void {
@@ -38,8 +45,8 @@ export class FakeMediaModel implements MediaModel {
     this.push(this.describeQueue, localPath, { error })
   }
 
-  async transcribe(path: string, mime: string | null): Promise<string> {
-    this.calls.push({ method: 'transcribe', path, mime })
+  async transcribe(path: string, mime: string | null, options?: TranscribeOptions): Promise<string> {
+    this.calls.push({ method: 'transcribe', path, mime, options })
     return this.take(this.transcriptQueue, path, 'transcribe')
   }
 

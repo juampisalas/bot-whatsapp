@@ -10,6 +10,7 @@ import {
 } from '../../store/repositories/attachments.ts'
 import { getDerivation, upsertDerivation } from '../../store/repositories/derivations.ts'
 import { attachments, conversations, messages } from '../../store/schema.ts'
+import { inferChatLanguagePrior } from './chat-language.ts'
 import type { MediaModel } from './port.ts'
 
 const ENRICH_CONCURRENCY = 2
@@ -38,6 +39,32 @@ type EnrichAttachment = {
   conversationExternalId: string
   conversationKind: InboundMessage['conversation']['kind']
   conversationName: string | null
+}
+
+function derivationModelFor(media: MediaModel, kind: 'transcript' | 'description'): string {
+  return kind === 'transcript' ? media.transcriptModel : media.describeModel
+}
+
+async function loadMessageTextsForPrior(
+  db: Db,
+  conversationId: string,
+  from: Date,
+  to: Date,
+): Promise<string[]> {
+  const rows = await db
+    .select({ text: messages.text })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        gte(messages.sentAt, from),
+        lt(messages.sentAt, to),
+      ),
+    )
+
+  return rows
+    .map((row) => row.text)
+    .filter((text): text is string => text != null && text.trim() !== '')
 }
 
 function derivationKindFor(kind: AttachmentKind): 'transcript' | 'description' | null {
@@ -156,12 +183,14 @@ async function enrichOne(
   provider: MessagingProvider,
   media: MediaModel,
   row: EnrichAttachment,
+  preferredLanguage: string | null,
   log: Logger,
 ): Promise<void> {
   const kind = derivationKindFor(row.kind)
   if (!kind) return
 
-  const existing = await getDerivation(db, row.id, kind, media.model)
+  const model = derivationModelFor(media, kind)
+  const existing = await getDerivation(db, row.id, kind, model)
   if (existing !== null) return
 
   const localPath = await ensureDownloaded(db, provider, row, log)
@@ -170,12 +199,16 @@ async function enrichOne(
   try {
     const text =
       kind === 'transcript'
-        ? await media.transcribe(localPath, row.mimeType)
+        ? await media.transcribe(localPath, row.mimeType, { preferredLanguage })
         : await media.describe(localPath, row.mimeType)
+    if (kind === 'transcript' && text.trim() === '') {
+      log.warn('empty transcript, skipping derivation', { attachmentId: row.id })
+      return
+    }
     await upsertDerivation(db, {
       attachmentId: row.id,
       kind,
-      model: media.model,
+      model,
       text,
     })
   } catch (error) {
@@ -217,5 +250,9 @@ export async function enrichRange(
   log: Logger = silentLogger,
 ): Promise<void> {
   const rows = await listEnrichableAttachments(db, conversationId, from, to)
-  await runPool(rows, ENRICH_CONCURRENCY, (row) => enrichOne(db, provider, media, row, log))
+  const messageTexts = await loadMessageTextsForPrior(db, conversationId, from, to)
+  const preferredLanguage = inferChatLanguagePrior(messageTexts)
+  await runPool(rows, ENRICH_CONCURRENCY, (row) =>
+    enrichOne(db, provider, media, row, preferredLanguage, log),
+  )
 }

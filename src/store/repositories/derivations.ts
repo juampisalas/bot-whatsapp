@@ -29,10 +29,15 @@ export async function getDerivation(
  * Loads cached derivation texts for many attachments under one model.
  * One entry per attachment id (audio → transcript, image → description).
  */
+export type DerivationModels = {
+  transcript: string
+  description: string
+}
+
 export async function listDerivationsByAttachmentIds(
   db: Db,
   attachmentIds: string[],
-  model: string,
+  models: DerivationModels,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
   if (attachmentIds.length === 0) return result
@@ -46,7 +51,7 @@ export async function listDerivationsByAttachmentIds(
     .where(
       and(
         inArray(attachmentDerivations.attachmentId, attachmentIds),
-        eq(attachmentDerivations.model, model),
+        inArray(attachmentDerivations.model, [models.transcript, models.description]),
       ),
     )
 

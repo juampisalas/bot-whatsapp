@@ -89,7 +89,14 @@ test('1: audio without derivation calls transcribe and creates a row', async () 
 
   await enrichRange(handle.db, provider, media, conversationId, FROM, TO)
 
-  expect(media.calls).toEqual([{ method: 'transcribe', path: localPath, mime: 'audio/ogg' }])
+  expect(media.calls).toEqual([
+    {
+      method: 'transcribe',
+      path: localPath,
+      mime: 'audio/ogg',
+      options: { preferredLanguage: null },
+    },
+  ])
   expect(await getDerivation(handle.db, attachmentId, 'transcript', media.model)).toBe(
     'hello from audio',
   )
@@ -181,10 +188,76 @@ test('6: failed attachment with attempts=1 retries download then transcribes', a
     .where(eq(attachments.id, attachmentId))
   expect(after[0]?.status).toBe('ok')
   expect(after[0]?.localPath).toBe(localPath)
-  expect(media.calls).toEqual([{ method: 'transcribe', path: localPath, mime: 'audio/ogg' }])
+  expect(media.calls).toEqual([
+    {
+      method: 'transcribe',
+      path: localPath,
+      mime: 'audio/ogg',
+      options: { preferredLanguage: null },
+    },
+  ])
   expect(await getDerivation(handle.db, attachmentId, 'transcript', media.model)).toBe(
     'recovered transcript',
   )
+})
+
+test('8: passes chat language prior to transcribe once per range', async () => {
+  const provider = new FakeProvider()
+  const media = new FakeMediaModel()
+  const pipeline = createIngestPipeline({
+    db: handle.db,
+    provider,
+    policy: { mode: 'all', rules: new Set() },
+    bufferMax: 10,
+  })
+  provider.onMessage(pipeline.handle)
+  await provider.connect()
+
+  await provider.inject(
+    mensaje({
+      externalId: 'msg-prior-1',
+      text: 'Hola che, cómo estás? Mañana nos vemos en el partido y gracias por avisar.',
+      sentAt: new Date('2026-08-30T11:00:00Z'),
+    }),
+  )
+  await provider.inject(
+    mensaje({
+      externalId: 'msg-prior-2',
+      attachments: [attachmentOf('audio', 'prior-audio')],
+      sentAt: new Date('2026-08-30T12:00:00Z'),
+    }),
+  )
+
+  const [conversation] = await handle.db.select({ id: conversations.id }).from(conversations)
+  const [attachment] = await handle.db
+    .select({ localPath: attachments.localPath })
+    .from(attachments)
+    .where(eq(attachments.externalId, 'prior-audio'))
+  if (!conversation || !attachment?.localPath) throw new Error('setup incomplete')
+
+  media.enqueueTranscript(attachment.localPath, 'hola desde audio')
+  await enrichRange(handle.db, provider, media, conversation.id, FROM, TO)
+
+  expect(media.calls).toEqual([
+    {
+      method: 'transcribe',
+      path: attachment.localPath,
+      mime: 'audio/ogg',
+      options: { preferredLanguage: 'es' },
+    },
+  ])
+})
+
+test('9: empty transcript is not stored', async () => {
+  const provider = new FakeProvider()
+  const media = new FakeMediaModel()
+  const { conversationId, localPath } = await ingestWith(provider, 'audio', 'empty-audio')
+  media.enqueueTranscript(localPath, '   ')
+
+  await enrichRange(handle.db, provider, media, conversationId, FROM, TO)
+
+  expect(media.calls).toHaveLength(1)
+  expect(await handle.db.select().from(attachmentDerivations)).toHaveLength(0)
 })
 
 test('7: failed attachment with attempts=3 skips download and transcribe', async () => {

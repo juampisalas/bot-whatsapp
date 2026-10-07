@@ -21,6 +21,16 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   DEEPSEEK_API_KEY: z.string().optional(),
+  WHISPER_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value !== 'false' && value !== '0'),
+  WHISPER_MODEL: z.string().min(1).default('medium'),
+  WHISPER_LANGUAGE_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.8),
+  FFMPEG_PATH: z.string().min(1).default('ffmpeg'),
+  WHISPER_PYTHON: z.string().min(1).default('python3'),
+  /** Override path to scripts/whisper_transcribe.py when not using the bundled script. */
+  WHISPER_SCRIPT: z.string().optional(),
 })
 
 export type Config = z.infer<typeof schema>

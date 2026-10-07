@@ -64,8 +64,9 @@ solo el rango pedido y filtra por similitud. Las respuestas del bot llevan el pr
 propios mensajes.
 
 Las imágenes del rango se describen al resumir (visión multimodal vía el mismo
-`LLM_MODEL` / Ollama). **La transcripción de audio no está disponible con este provider**
-(ai-sdk-ollama acepta imágenes en `generateText`; no hay API de audio ni Whisper).
+`LLM_MODEL` / Ollama). Los audios se transcriben al resumir con **faster-whisper**
+local (`WHISPER_MODEL`, ver `.env.example`). Necesitás `ffmpeg` y el paquete Python
+`faster-whisper`; si no están disponibles, el resumen sigue con `[voice note, Ns]`.
 
 ## Comandos
 

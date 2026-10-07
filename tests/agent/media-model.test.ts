@@ -13,7 +13,8 @@ test('createMediaModel transcribe logs and rejects without Whisper', async () =>
       warnings.push({ message, meta })
     },
   }
-  const media = createMediaModel(loadConfig({ ...base, LLM_PROVIDER: 'ollama' }), log)
+  const media = createMediaModel(loadConfig({ ...base, LLM_PROVIDER: 'ollama', WHISPER_ENABLED: 'false' }), log)
+  expect(media.describeModel).toBe('qwen3.6:35b-a3b')
   expect(media.model).toBe('qwen3.6:35b-a3b')
   await expect(media.transcribe('/tmp/voice.ogg', 'audio/ogg')).rejects.toThrow(
     /audio transcription unavailable with this provider/,
