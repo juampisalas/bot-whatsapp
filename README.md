@@ -45,6 +45,11 @@ línea, con su identificador y su nombre: copiá el del grupo de control a
 `CONTROL_CONVERSATION_ID` en `.env`. Los chats uno a uno no aparecen, y para el grupo de
 control eso alcanza.
 
+Si el QR falla (p. ej. “revisá tu conexión”), podés vincular con código: seteá
+`WHATSAPP_PHONE_NUMBER` (solo dígitos, con código de país, p. ej. `54911…`) y volvé a
+correr `list-conversations`. El bot imprime un código de 8 dígitos; en el teléfono:
+Dispositivos vinculados → Vincular con número de teléfono.
+
 La sesión queda guardada en `WHATSAPP_AUTH_DIR`, así que el QR solo se pide una vez. Si
 cerrás el dispositivo vinculado desde el teléfono, hay que borrar ese directorio y volver a
 vincular.

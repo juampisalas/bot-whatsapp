@@ -35,7 +35,14 @@ export const conversations = pgTable(
     /** Identificador nativo del canal. En WhatsApp es el JID, por ejemplo `1203...@g.us`. */
     externalId: text('external_id').notNull(),
     kind: text('kind').$type<ConversationKind>().notNull(),
+    /** Cached canonical label used for search and display. */
     name: text('name'),
+    /** Name saved in the phone address book, when the channel reports it. */
+    addressBookName: text('address_book_name'),
+    /** WhatsApp profile / push name for the contact. */
+    pushName: text('push_name'),
+    /** Digits of the WhatsApp phone JID; also stored on @lid rows when mapped. */
+    phoneNumber: text('phone_number'),
     /** Momento del último mensaje capturado, para ordenar por actividad reciente. */
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -52,8 +59,12 @@ export const participants = pgTable(
     provider: text('provider').$type<ProviderId>().notNull(),
     /** Identificador nativo del remitente. En WhatsApp es su JID. */
     externalId: text('external_id').notNull(),
-    /** Nombre que el canal reporta. Puede faltar y puede cambiar con el tiempo. */
+    /** Cached canonical label used for search and display. */
     displayName: text('display_name'),
+    /** Name saved in the phone address book, when the channel reports it. */
+    addressBookName: text('address_book_name'),
+    /** WhatsApp profile / push name for the contact. */
+    pushName: text('push_name'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

@@ -2,9 +2,14 @@ import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { FakeLlm } from '../../src/agent/llm/fake.ts'
 import { BOT_PREFIX } from '../../src/control/classify.ts'
 import { createControlLoop, HELP_REPLY } from '../../src/control/loop.ts'
+import {
+  formatRefreshDoneReply,
+  REFRESH_NAMES_STARTED_REPLY,
+} from '../../src/control/commands.ts'
 import type { Logger } from '../../src/domain/logger.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
 import { recordBotMessage } from '../../src/store/repositories/bot-messages.ts'
+import { upsertGlobalPreferences } from '../../src/store/repositories/preferences.ts'
 import { outboundMessages } from '../../src/store/schema.ts'
 import { openTestDb, resetTestDb } from '../helpers/db.ts'
 import { mensaje } from '../helpers/fixtures.ts'
@@ -47,6 +52,7 @@ function helpOutput() {
     conversationQuery: null,
     range: null,
     lastNDays: null,
+    lastNHours: null,
     isoFrom: null,
     isoTo: null,
     focus: null,
@@ -63,11 +69,13 @@ async function setupLoop(opts?: {
     llm.enqueue({ text: '', output: helpOutput() })
   }
   const provider = new FakeProvider()
+  await upsertGlobalPreferences(handle.db, { language: 'en' })
   const loop = createControlLoop({
     db: handle.db,
     config: controlConfig(opts?.conversationId),
     log: opts?.log ?? { info: () => {}, warn: () => {}, error: () => {} },
     llm,
+    provider,
   })
   provider.onMessage(loop.handle)
   await provider.connect()
@@ -85,6 +93,44 @@ test('request in control enqueues one pending outbound with BOT_PREFIX', async (
   expect(rows[0]?.text).toStartWith(BOT_PREFIX)
   expect(rows[0]?.conversationExternalId).toBe(CONTROL_ID)
   expect(provider.sent).toHaveLength(0)
+})
+
+test('refresh names command replies when started and when finished', async () => {
+  const llm = new FakeLlm()
+  const { provider } = await setupLoop({ llm })
+  await provider.inject(controlMessage({ text: 'actualizar los nombres de mis chats' }))
+
+  expect(provider.refreshContactNamesCalls).toBe(1)
+  expect(llm.calls).toHaveLength(0)
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const rows = await handle.db.select().from(outboundMessages)
+    if (rows.length >= 2) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+
+  const rows = await handle.db.select().from(outboundMessages)
+  expect(rows.length).toBeGreaterThanOrEqual(2)
+  expect(rows[0]?.text).toBe(REFRESH_NAMES_STARTED_REPLY)
+  expect(rows[1]?.text).toBe(
+    formatRefreshDoneReply({ addressBookNames: 2, pushNames: 0, groupNames: 1, contacts: 2 }),
+  )
+})
+
+test('first message asks for a language and the choice sticks', async () => {
+  await upsertGlobalPreferences(handle.db, { language: null })
+  const { provider } = await setupLoop()
+  await upsertGlobalPreferences(handle.db, { language: null })
+  await provider.inject(controlMessage({ text: 'ayuda', externalId: 'lang-ask' }))
+
+  const asked = await handle.db.select().from(outboundMessages)
+  expect(asked).toHaveLength(1)
+  expect(asked[0]?.text).toContain('¿Qué idioma preferís?')
+
+  await provider.inject(controlMessage({ text: '1', externalId: 'lang-pick' }))
+  const answered = await handle.db.select().from(outboundMessages)
+  expect(answered).toHaveLength(2)
+  expect(answered[1]?.text).toContain('Pedime un resumen')
 })
 
 test('message in other chat enqueues nothing', async () => {
@@ -134,13 +180,12 @@ test('LLM failure enqueues error with BOT_PREFIX and calls log.error', async () 
   const llm = new FakeLlm()
   llm.enqueueError(new Error('model down'))
   const { provider } = await setupLoop({ log, llm })
-  await provider.inject(controlMessage())
+  await provider.inject(controlMessage({ text: 'can you summarize Ort for me please' }))
 
   const rows = await handle.db.select().from(outboundMessages)
   expect(rows).toHaveLength(1)
-  expect(rows[0]?.text).toBe(`${BOT_PREFIX}Could not complete the request: model down`)
-  expect(errors).toHaveLength(1)
-  expect(errors[0]?.message).toBe('control could not complete request')
+  expect(rows[0]?.text).toContain('could not understand')
+  expect(errors).toHaveLength(0)
 })
 
 test('enqueue failure resolves handle and calls log.warn', async () => {

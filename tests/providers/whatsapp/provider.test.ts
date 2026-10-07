@@ -65,6 +65,10 @@ class TestSocket {
     for (const handler of this.connectionHandlers) handler({ connection: 'open' })
   }
 
+  emitQr(qr: string): void {
+    for (const handler of this.connectionHandlers) handler({ qr })
+  }
+
   emitClose(statusCode?: number): void {
     const error = statusCode === undefined ? undefined : { output: { statusCode } }
     for (const handler of this.connectionHandlers) {
@@ -92,6 +96,61 @@ test('acepta una factory de sockets para probar el ciclo de conexión sin red', 
   })
 
   expect(adapter.id).toBe('whatsapp')
+})
+
+test('requests a pairing code when phoneNumber is set and credentials are not registered', async () => {
+  const requestPairingCode = jest.fn(async () => 'ABCD1234')
+  const logs: string[] = []
+  const socket = new TestSocket()
+  Object.assign(socket.value, {
+    authState: { creds: { registered: false } },
+    requestPairingCode,
+  })
+
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    phoneNumber: '5491112345678',
+    socketFactory: () => socket.value,
+    log: {
+      info: (message) => {
+        logs.push(message)
+      },
+      warn: () => {},
+      error: () => {},
+    },
+  })
+
+  await adapter.connect()
+  socket.emitQr('ready-to-pair')
+  await flushMicrotasks()
+
+  expect(requestPairingCode).toHaveBeenCalledWith('5491112345678')
+  expect(logs.some((line) => line.includes('ABCD-1234'))).toBe(true)
+
+  await adapter.disconnect()
+})
+
+test('does not print a QR while waiting for a pairing code', async () => {
+  const socket = new TestSocket()
+  Object.assign(socket.value, {
+    authState: { creds: { registered: false } },
+    requestPairingCode: async () => '11112222',
+  })
+
+  const adapter = new WhatsAppProvider({
+    authDir: './unused',
+    mediaDir: './unused',
+    phoneNumber: '5491112345678',
+    socketFactory: () => socket.value,
+  })
+
+  await adapter.connect()
+  // Pairing mode must ignore QR drawing (would otherwise use qrcode-terminal).
+  expect(() => socket.emitQr('should-not-draw')).not.toThrow()
+  await flushMicrotasks()
+
+  await adapter.disconnect()
 })
 
 test('dos eventos close concurrentes producen un solo socket de reemplazo', async () => {

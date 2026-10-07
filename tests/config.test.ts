@@ -56,3 +56,21 @@ test('LLM defaults to ollama / qwen3.6:35b-a3b', () => {
 test('rejects an unknown LLM_PROVIDER', () => {
   expect(() => loadConfig({ ...base, LLM_PROVIDER: 'gemini' })).toThrow(/LLM_PROVIDER/)
 })
+
+test('strips non-digits from WHATSAPP_PHONE_NUMBER', () => {
+  const config = loadConfig({ ...base, WHATSAPP_PHONE_NUMBER: '+54 9 11 1234-5678' })
+  expect(config.WHATSAPP_PHONE_NUMBER).toBe('5491112345678')
+})
+
+test('WHISPER defaults to enabled medium model', () => {
+  const config = loadConfig(base)
+  expect(config.WHISPER_ENABLED).toBe(true)
+  expect(config.WHISPER_MODEL).toBe('medium')
+  expect(config.WHISPER_LANGUAGE_CONFIDENCE).toBe(0.8)
+  expect(config.FFMPEG_PATH).toBe('ffmpeg')
+  expect(config.WHISPER_PYTHON).toBe('python3')
+})
+
+test('WHISPER_ENABLED=false disables whisper runner', () => {
+  expect(loadConfig({ ...base, WHISPER_ENABLED: 'false' }).WHISPER_ENABLED).toBe(false)
+})

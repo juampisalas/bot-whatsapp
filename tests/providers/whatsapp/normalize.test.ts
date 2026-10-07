@@ -45,8 +45,9 @@ test('detecta una conversación uno a uno', () => {
   )
 
   expect(result?.conversation.kind).toBe('dm')
-  expect(result?.conversation.name).toBe('Ana')
+  expect(result?.conversation.name).toBeNull()
   expect(result?.sender?.externalId).toBe('5491111111111@s.whatsapp.net')
+  expect(result?.sender?.displayName).toBe('Ana')
 })
 
 test('no usa el nombre propio como nombre de una conversación saliente', () => {

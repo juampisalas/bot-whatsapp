@@ -1,6 +1,7 @@
 import { createEmbedder, createLlm } from './agent/llm/registry.ts'
 import { createMediaModel } from './agent/media/model.ts'
 import { createIngestPipeline } from './capture/ingest.ts'
+import { persistContactMeta, persistConversationMeta, syncDirectoryToDb } from './capture/directory.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
 import { loadConfig } from './config/index.ts'
@@ -16,7 +17,6 @@ import { createProvider } from './providers/registry.ts'
 import { createShutdown } from './shutdown.ts'
 import { createDb } from './store/client.ts'
 import { loadCapturePolicy } from './store/repositories/capture-policy.ts'
-import { upsertConversation } from './store/repositories/conversations.ts'
 import { deleteMessageByExternalId } from './store/repositories/messages.ts'
 
 const config = loadConfig()
@@ -182,15 +182,21 @@ provider.onMessage(async (message) => {
 
 provider.onConversationMeta?.(async (conversation) => {
   try {
-    await upsertConversation(db, {
-      provider: provider.id,
-      externalId: conversation.externalId,
-      kind: conversation.kind,
-      name: conversation.name,
-    })
+    await persistConversationMeta(db, provider.id, conversation)
   } catch (error) {
     log.warn('could not upsert conversation metadata', {
       externalId: conversation.externalId,
+      error: describeError(error),
+    })
+  }
+})
+
+provider.onContactMeta?.(async (contact) => {
+  try {
+    await persistContactMeta(db, provider.id, contact)
+  } catch (error) {
+    log.warn('could not sync contact metadata', {
+      externalIds: contact.externalIds,
       error: describeError(error),
     })
   }
@@ -255,3 +261,10 @@ try {
   process.exit(1)
 }
 log.info('capturing messages')
+void syncDirectoryToDb(db, provider)
+  .then(() => {
+    log.info('initial directory sync finished')
+  })
+  .catch((error) => {
+    log.warn('initial directory sync failed', { error: describeError(error) })
+  })

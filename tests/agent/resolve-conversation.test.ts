@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { eq } from 'drizzle-orm'
 import { resolveConversation } from '../../src/agent/resolve-conversation.ts'
-import { upsertConversation } from '../../src/store/repositories/conversations.ts'
+import {
+  searchConversationsByName,
+  syncAddressBookName,
+  syncPushName,
+  upsertConversation,
+  upsertParticipant,
+} from '../../src/store/repositories/conversations.ts'
+import { insertMessage } from '../../src/store/repositories/messages.ts'
 import { upsertChatPreferences } from '../../src/store/repositories/preferences.ts'
 import { conversations } from '../../src/store/schema.ts'
 import { openTestDb, resetTestDb } from '../helpers/db.ts'
@@ -89,4 +96,96 @@ test('query trabajo resolves to a single conversation', async () => {
 test('query zzz finds nothing', async () => {
   const result = await resolveConversation(handle.db, 'fake', 'zzz')
   expect(result).toEqual({ kind: 'none' })
+})
+
+test('query matches participant address-book name on a dm', async () => {
+  const marianoId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'mariano-dm',
+    kind: 'dm',
+    name: null,
+  })
+  await syncAddressBookName(handle.db, 'fake', {
+    externalIds: ['mariano-dm'],
+    name: 'Mariano Mangialavori',
+  })
+
+  const result = await resolveConversation(handle.db, 'fake', 'Mariano Mangialavori')
+  expect(result).toEqual({ kind: 'resolved', conversationId: marianoId })
+})
+
+test('fuzzy query resolves when only one similar chat exists', async () => {
+  const marianId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: 'marian-dm',
+    kind: 'dm',
+    name: null,
+  })
+  await syncPushName(handle.db, 'fake', {
+    externalIds: ['marian-dm'],
+    name: 'Marian',
+  })
+
+  const result = await resolveConversation(handle.db, 'fake', 'Mariano Mangialavori')
+  expect(result).toEqual({ kind: 'resolved', conversationId: marianId })
+})
+
+test('multi-word query matches saved address-book name on conversation', async () => {
+  const marianoId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: '28106349916326@lid',
+    kind: 'dm',
+    name: null,
+  })
+  await syncAddressBookName(handle.db, 'fake', {
+    externalIds: ['28106349916326@lid', '5491149800824@s.whatsapp.net'],
+    name: 'Mariano Mangialavori',
+  })
+
+  const hits = await searchConversationsByName(handle.db, 'fake', 'Mariano Mangialavori')
+  expect(hits.map((hit) => hit.id)).toContain(marianoId)
+
+  const result = await resolveConversation(handle.db, 'fake', 'Mariano Mangialavori')
+  expect(result).toEqual({ kind: 'resolved', conversationId: marianoId })
+})
+
+test('exact saved name resolves even when a group shares the same participant tokens', async () => {
+  const marianoId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: '28106349916326@lid',
+    kind: 'dm',
+    name: null,
+  })
+  await syncAddressBookName(handle.db, 'fake', {
+    externalIds: ['28106349916326@lid'],
+    name: 'Mariano Mangialavori',
+  })
+
+  const padelId = await upsertConversation(handle.db, {
+    provider: 'fake',
+    externalId: '120363430912191194@g.us',
+    kind: 'group',
+    name: 'Padel Nordeltus',
+  })
+  const participantId = await upsertParticipant(handle.db, {
+    provider: 'fake',
+    externalId: 'mariano-in-padel',
+    displayName: 'Mariano Mangialavori',
+  })
+  await insertMessage(handle.db, {
+    provider: 'fake',
+    externalId: 'padel-msg-1',
+    conversationId: padelId,
+    participantId,
+    sentAt: new Date('2026-08-31T16:50:30Z'),
+    fromSelf: false,
+    text: 'hola',
+    subject: null,
+    threadExternalId: null,
+    replyToExternalId: null,
+    raw: null,
+  })
+
+  const result = await resolveConversation(handle.db, 'fake', 'Mariano Mangialavori')
+  expect(result).toEqual({ kind: 'resolved', conversationId: marianoId })
 })

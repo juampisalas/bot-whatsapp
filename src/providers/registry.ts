@@ -17,6 +17,7 @@ export function createProvider(
       return new WhatsAppProvider({
         authDir: config.WHATSAPP_AUTH_DIR,
         mediaDir: config.MEDIA_DIR,
+        phoneNumber: config.WHATSAPP_PHONE_NUMBER,
         log,
       })
     default:

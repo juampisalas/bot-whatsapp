@@ -1,3 +1,4 @@
+import { emptyPeriod } from '../../control/i18n.ts'
 import type { MessagingProvider } from '../../domain/provider.ts'
 import type { Db } from '../../store/client.ts'
 import { findValidChunk, upsertChunk } from '../../store/repositories/chunks.ts'
@@ -20,7 +21,7 @@ import {
   buildPartialUserPrompt,
 } from './prompt.ts'
 
-export const EMPTY_RANGE_SUMMARY = 'No messages in that period.'
+export const EMPTY_RANGE_SUMMARY = emptyPeriod('en')
 
 export type SummarizeInput = {
   db: Db
@@ -147,7 +148,7 @@ export async function summarize(input: SummarizeInput): Promise<string> {
     }
   }
 
-  if (partials.length === 0) return EMPTY_RANGE_SUMMARY
+  if (partials.length === 0) return emptyPeriod(preferences.language)
   if (partials.length === 1) return partials[0]!.text
 
   const combo = await llm.generate({

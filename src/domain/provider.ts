@@ -22,6 +22,27 @@ export interface ConversationMeta {
 
 export type ConversationMetaHandler = (conversation: ConversationMeta) => Promise<void>
 
+/** Saved or push contact name from the channel address book, keyed by one or more JIDs. */
+export interface ContactMeta {
+  externalIds: string[]
+  addressBookName?: string | null
+  pushName?: string | null
+}
+
+export type ContactMetaHandler = (contact: ContactMeta) => Promise<void>
+
+export interface ContactRefreshResult {
+  addressBookNames: number
+  pushNames: number
+  groupNames: number
+  contacts: number
+}
+
+export type DirectorySyncHandlers = {
+  onContact: (contact: ContactMeta) => Promise<void>
+  onConversation: (conversation: ConversationMeta) => Promise<void>
+}
+
 export interface MessagingProvider {
   readonly id: ProviderId
 
@@ -59,6 +80,9 @@ export interface MessagingProvider {
    */
   onConversationMeta?(handler: ConversationMetaHandler): void
 
+  /** Optional: contact name updates from the channel address book. */
+  onContactMeta?(handler: ContactMetaHandler): void
+
   /**
    * Sends a message. `idempotencyKey` is used as the message id when the channel
    * allows it, so a retry does not produce a duplicate.
@@ -73,4 +97,13 @@ export interface MessagingProvider {
   downloadAttachment(message: InboundMessage, attachmentExternalId: string): Promise<DownloadedMedia>
 
   listConversations(): Promise<ConversationSummary[]>
+
+  /**
+   * Re-fetches the full contact and group directory from the channel and invokes
+   * handlers for every entry. Used on connect and when a chat name is not found locally.
+   */
+  syncDirectory?(handlers: DirectorySyncHandlers): Promise<ContactRefreshResult>
+
+  /** Optional: re-fetch address-book and group names from the channel. */
+  refreshContactNames?(): Promise<ContactRefreshResult>
 }

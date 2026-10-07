@@ -6,6 +6,7 @@ import { createControlLoop, HELP_REPLY } from '../../src/control/loop.ts'
 import { silentLogger } from '../../src/domain/logger.ts'
 import { createDispatcher } from '../../src/outbox/dispatcher.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
+import { upsertGlobalPreferences } from '../../src/store/repositories/preferences.ts'
 import { outboundMessages } from '../../src/store/schema.ts'
 import { openTestDb, resetTestDb } from '../helpers/db.ts'
 import { mensaje } from '../helpers/fixtures.ts'
@@ -36,6 +37,7 @@ function helpOutput() {
     conversationQuery: null,
     range: null,
     lastNDays: null,
+    lastNHours: null,
     isoFrom: null,
     isoTo: null,
     focus: null,
@@ -45,6 +47,7 @@ function helpOutput() {
 async function assemble(llm: FakeLlm = new FakeLlm()) {
   const provider = new FakeProvider()
   await provider.connect()
+  await upsertGlobalPreferences(handle.db, { language: 'en' })
   const pipeline = createIngestPipeline({
     db: handle.db,
     provider,

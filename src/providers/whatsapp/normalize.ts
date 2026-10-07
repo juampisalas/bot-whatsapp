@@ -166,14 +166,8 @@ export function normalizeWAMessage(
     : kind === 'group'
       ? (waMessage.key?.participant ?? null)
       : remoteJid
-  // `pushName` names the author, so it names the conversation only when that author is
-  // the DM contact. Groups take their subject from Baileys group metadata instead.
-  const conversationName =
-    kind === 'group'
-      ? (options.groupName ?? null)
-      : kind === 'dm' && !fromSelf
-        ? (waMessage.pushName ?? null)
-        : null
+  // DMs take their display label from address book / phone / push name sync, not inline here.
+  const conversationName = kind === 'group' ? (options.groupName ?? null) : null
 
   const externalId = `${remoteJid}:${messageId}`
 

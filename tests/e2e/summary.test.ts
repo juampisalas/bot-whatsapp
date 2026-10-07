@@ -8,6 +8,7 @@ import { createIngestPipeline } from '../../src/capture/ingest.ts'
 import { BOT_PREFIX } from '../../src/control/classify.ts'
 import { createControlLoop } from '../../src/control/loop.ts'
 import { silentLogger } from '../../src/domain/logger.ts'
+import { upsertGlobalPreferences } from '../../src/store/repositories/preferences.ts'
 import { createDispatcher } from '../../src/outbox/dispatcher.ts'
 import { FakeProvider } from '../../src/providers/fake/index.ts'
 import { upsertConversation, upsertParticipant } from '../../src/store/repositories/conversations.ts'
@@ -43,6 +44,7 @@ function summarizeOutput(overrides: Record<string, unknown> = {}) {
     conversationQuery: 'la facu',
     range: 'iso',
     lastNDays: null,
+    lastNHours: null,
     isoFrom: '2026-08-29T00:00:00',
     isoTo: '2026-08-31T00:00:00',
     focus: null,
@@ -56,6 +58,7 @@ async function assemble(
 ) {
   const provider = new FakeProvider()
   await provider.connect()
+  await upsertGlobalPreferences(handle.db, { language: 'en' })
   const pipeline = createIngestPipeline({
     db: handle.db,
     provider,
@@ -90,7 +93,7 @@ async function assemble(
 function controlRequest(overrides: Parameters<typeof mensaje>[0] = {}) {
   return mensaje({
     fromSelf: true,
-    text: 'summarize la facu',
+    text: 'summarize la facu today',
     conversation: { externalId: CONTROL_ID, kind: 'group', name: 'Control' },
     sentAt: new Date('2026-08-30T18:00:00-03:00'),
     ...overrides,
@@ -193,7 +196,6 @@ async function seedTargetChat(opts?: {
 test('1: summary request replies in control with FakeLlm text', async () => {
   await seedTargetChat()
   const llm = new FakeLlm()
-  llm.enqueue({ text: '', output: summarizeOutput({ range: 'today', isoFrom: null, isoTo: null }) })
   llm.enqueue({ text: 'facu summary body' })
 
   const { provider, dispatcher } = await assemble(llm)
@@ -218,15 +220,6 @@ test('2: ambiguous ask then number resolves and summarizes', async () => {
   })
 
   const llm = new FakeLlm()
-  llm.enqueue({
-    text: '',
-    output: summarizeOutput({
-      conversationQuery: 'facu',
-      range: 'today',
-      isoFrom: null,
-      isoTo: null,
-    }),
-  })
   llm.enqueue({ text: 'picked summary' })
 
   const { provider, dispatcher } = await assemble(llm)
@@ -234,14 +227,15 @@ test('2: ambiguous ask then number resolves and summarizes', async () => {
   await provider.inject(
     controlRequest({
       externalId: 'amb-1',
-      text: 'summarize facu',
+      text: 'summarize facu today',
     }),
   )
   expect(await dispatcher.tick(new Date())).toBe(1)
   expect(provider.sent[0]?.content.text).toStartWith(BOT_PREFIX)
-  expect(provider.sent[0]?.content.text).toContain('Which conversation did you mean?')
+  expect(provider.sent[0]?.content.text).toContain('Which contact did you mean?')
   expect(provider.sent[0]?.content.text).toContain('1.')
   expect(provider.sent[0]?.content.text).toContain('2.')
+  expect(provider.sent[0]?.content.text).toContain('0. Cancel')
 
   await provider.inject(
     controlRequest({
@@ -258,24 +252,26 @@ test('3: overlapping second request reuses cached partials', async () => {
   await seedTargetChat({ twoDays: true })
   const llm = new FakeLlm()
 
-  llm.enqueue({ text: '', output: summarizeOutput() })
   llm.enqueue({ text: 'parcial-A' })
   llm.enqueue({ text: 'parcial-B' })
   llm.enqueue({ text: 'combo-1' })
 
-  llm.enqueue({ text: '', output: summarizeOutput() })
   llm.enqueue({ text: 'combo-2' })
 
   const { provider, dispatcher } = await assemble(llm)
 
-  await provider.inject(controlRequest({ externalId: 'cache-1' }))
+  await provider.inject(
+    controlRequest({ externalId: 'cache-1', text: 'summarize la facu last 7 days' }),
+  )
   expect(await dispatcher.tick(new Date())).toBe(1)
   expect(provider.sent[0]?.content.text).toBe(`${BOT_PREFIX}combo-1`)
 
   const partialsAfterFirst = llm.calls.filter((call) => isPartialSystemPrompt(call.system)).length
   expect(partialsAfterFirst).toBe(2)
 
-  await provider.inject(controlRequest({ externalId: 'cache-2' }))
+  await provider.inject(
+    controlRequest({ externalId: 'cache-2', text: 'summarize la facu last 7 days' }),
+  )
   expect(await dispatcher.tick(new Date())).toBe(1)
   expect(provider.sent[1]?.content.text).toBe(`${BOT_PREFIX}combo-2`)
 
@@ -304,7 +300,10 @@ test('5: focus embeds missing then reuses on second request', async () => {
   const { provider, dispatcher } = await assemble(llm, { embedder })
 
   await provider.inject(
-    controlRequest({ externalId: 'focus-1', text: 'summarize la facu about cats' }),
+    controlRequest({
+      externalId: 'focus-1',
+      text: 'please catch me up on la facu about cats',
+    }),
   )
   expect(await dispatcher.tick(new Date())).toBe(1)
   expect(provider.sent[0]?.content.text).toBe(`${BOT_PREFIX}cats focus 1`)
@@ -314,7 +313,10 @@ test('5: focus embeds missing then reuses on second request', async () => {
   const callsAfterFirst = embedder.calls.length
 
   await provider.inject(
-    controlRequest({ externalId: 'focus-2', text: 'summarize la facu about cats' }),
+    controlRequest({
+      externalId: 'focus-2',
+      text: 'please catch me up on la facu about cats',
+    }),
   )
   expect(await dispatcher.tick(new Date())).toBe(1)
   expect(provider.sent[1]?.content.text).toBe(`${BOT_PREFIX}cats focus 2`)
@@ -327,15 +329,7 @@ test('5: focus embeds missing then reuses on second request', async () => {
 test('6: attachments enrich once within range and stay cached', async () => {
   const media = new FakeMediaModel()
   const llm = new FakeLlm()
-  llm.enqueue({
-    text: '',
-    output: summarizeOutput({ range: 'today', isoFrom: null, isoTo: null }),
-  })
   llm.enqueue({ text: 'with audio' })
-  llm.enqueue({
-    text: '',
-    output: summarizeOutput({ range: 'today', isoFrom: null, isoTo: null }),
-  })
 
   const { provider, dispatcher } = await assemble(llm, { media })
 

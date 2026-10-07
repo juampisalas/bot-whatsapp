@@ -1,11 +1,16 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import makeWASocket, {
+  ALL_WA_PATCH_NAMES,
+  Browsers,
   DisconnectReason,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   useMultiFileAuthState,
+  type Contact,
+  type Chat,
+  type LIDMapping,
   type WAMessage,
   type WASocket,
 } from 'baileys'
@@ -13,11 +18,15 @@ import qrcode from 'qrcode-terminal'
 import { describeError, silentLogger, type Logger } from '../../domain/logger.ts'
 import type {
   ConversationMetaHandler,
+  ContactMetaHandler,
+  ContactRefreshResult,
+  DirectorySyncHandlers,
   FatalHandler,
   InboundHandler,
   MessagingProvider,
 } from '../../domain/provider.ts'
 import type {
+  ConversationKind,
   ConversationRef,
   ConversationSummary,
   DownloadedMedia,
@@ -28,10 +37,30 @@ import type {
 } from '../../domain/types.ts'
 import { decodeRaw } from '../../store/raw.ts'
 import { createBaileysLogger } from './baileys-logger.ts'
+import {
+  chatLabelFromBaileys,
+  contactMetaFromBaileys,
+  contactMetaFromChat,
+  contactMetaFromLidMapping,
+} from './contact-meta.ts'
 import { normalizeWAMessage } from './normalize.ts'
 
 const DISPATCH_DRAIN_TIMEOUT_MS = 10_000
 const DEFAULT_READY_TIMEOUT_MS = 600_000
+const DIRECTORY_RESYNC_WAIT_MS = 20_000
+const DIRECTORY_CONTACT_IDLE_MS = 2_000
+
+type WhatsAppSocket = WASocket & {
+  cleanDirtyBits?: (type: 'account_sync' | 'groups', fromTimestamp?: number | string) => Promise<void>
+}
+
+function conversationKindFromJid(jid: string): ConversationKind | null {
+  if (jid.endsWith('@g.us')) return 'group'
+  if (jid.endsWith('@newsletter')) return 'channel'
+  if (jid.endsWith('@broadcast')) return null
+  if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) return 'dm'
+  return null
+}
 
 /** Attachment bytes already resolved from the original baileys payload. */
 export type MediaDownloader = (message: WAMessage) => Promise<Uint8Array>
@@ -39,6 +68,8 @@ export type MediaDownloader = (message: WAMessage) => Promise<Uint8Array>
 export interface WhatsAppProviderOptions {
   authDir: string
   mediaDir: string
+  /** Digits with country code. When set, request a pairing code instead of printing a QR. */
+  phoneNumber?: string
   log?: Logger
   socketFactory?: () => WASocket | Promise<WASocket>
   /** Injected for the same reason as `socketFactory`: test without hitting the network. */
@@ -82,6 +113,7 @@ export class WhatsAppProvider implements MessagingProvider {
   private handler: InboundHandler | null = null
   private fatalHandler: FatalHandler | null = null
   private conversationMetaHandler: ConversationMetaHandler | null = null
+  private contactMetaHandler: ContactMetaHandler | null = null
   private state: ConnectionState = 'idle'
   private terminalError: Error | null = null
   private generation = 0
@@ -91,6 +123,12 @@ export class WhatsAppProvider implements MessagingProvider {
   private readonly readyWaiters: ReadyWaiter[] = []
   private readonly inFlightDispatches = new Set<Promise<void>>()
   private readonly groupNames = new Map<string, string>()
+  /** True when auth files already identify this device; skip pairing-code requests. */
+  private alreadyLinked = false
+  private pairingCodeRequested = false
+  private contactRefreshStats: ContactRefreshResult | null = null
+  private readonly contactCache = new Map<string, Partial<Contact> & { id: string }>()
+  private readonly chatCache = new Map<string, Chat>()
 
   constructor(private readonly options: WhatsAppProviderOptions) {}
 
@@ -108,6 +146,10 @@ export class WhatsAppProvider implements MessagingProvider {
 
   onConversationMeta(handler: ConversationMetaHandler): void {
     this.conversationMetaHandler = handler
+  }
+
+  onContactMeta(handler: ContactMetaHandler): void {
+    this.contactMetaHandler = handler
   }
 
   /** The notice runs inside a baileys event: if it throws, shutdown must still continue. */
@@ -152,7 +194,7 @@ export class WhatsAppProvider implements MessagingProvider {
 
   private async installSocket(): Promise<boolean> {
     const generation = ++this.generation
-    const { socket, saveCreds } = await this.createSocket()
+    const { socket, saveCreds, alreadyLinked } = await this.createSocket()
     if (!this.isAttemptCurrent(generation)) {
       await this.endSocket(socket)
       return false
@@ -166,8 +208,42 @@ export class WhatsAppProvider implements MessagingProvider {
     }
 
     this.socket = socket
+    this.alreadyLinked = alreadyLinked
+    this.pairingCodeRequested = false
     this.bindSocket(socket, generation, saveCreds)
     return true
+  }
+
+  private pairingPhoneDigits(): string | undefined {
+    const digits = this.options.phoneNumber?.replace(/\D/g, '')
+    return digits && digits.length > 0 ? digits : undefined
+  }
+
+  /**
+   * Links via an 8-digit code (WhatsApp → Linked devices → Link with phone number)
+   * when `phoneNumber` is configured and credentials are not registered yet.
+   * Must run after Baileys emits a QR/connection signal — not immediately on socket create.
+   */
+  private async maybeRequestPairingCode(socket: WASocket): Promise<void> {
+    const phone = this.pairingPhoneDigits()
+    if (!phone || this.alreadyLinked || this.pairingCodeRequested) return
+    if (typeof socket.requestPairingCode !== 'function') return
+
+    this.pairingCodeRequested = true
+    try {
+      const code = await socket.requestPairingCode(phone)
+      const formatted =
+        code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code
+      this.log.info(
+        `enter this code in WhatsApp → Linked devices → Link with phone number: ${formatted}`,
+      )
+      this.bumpReadyWaiters()
+    } catch (error) {
+      this.pairingCodeRequested = false
+      this.log.error('could not request WhatsApp pairing code', {
+        error: describeError(error),
+      })
+    }
   }
 
   private isAttemptCurrent(generation: number): boolean {
@@ -198,8 +274,13 @@ export class WhatsAppProvider implements MessagingProvider {
     socket.ev.on('connection.update', (update) => {
       if (!this.isCurrentSocket(socket, generation)) return
       if (update.qr) {
-        this.log.info('scan this QR from WhatsApp → Linked devices')
         this.bumpReadyWaiters()
+        if (this.pairingPhoneDigits()) {
+          // Pairing-code mode: Baileys emits QR when the socket is ready to link.
+          void this.maybeRequestPairingCode(socket)
+          return
+        }
+        this.log.info('scan this QR from WhatsApp → Linked devices')
         // Baileys only delivers the QR payload: linking the device requires drawing it.
         qrcode.generate(update.qr, { small: true })
       }
@@ -209,6 +290,7 @@ export class WhatsAppProvider implements MessagingProvider {
         this.settleReadyWaiters()
         this.log.info('WhatsApp connection established')
         void this.refreshGroupNames(socket)
+        void this.refreshContacts(socket)
       }
       if (update.connection === 'close') {
         this.handleClose(socket, generation, update.lastDisconnect?.error)
@@ -217,13 +299,68 @@ export class WhatsAppProvider implements MessagingProvider {
 
     socket.ev.on('messages.upsert', ({ messages, type }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      // Only 'notify' carries live messages; 'append' is offline backlog replayed on connect.
       this.trackDispatch(this.dispatch(messages, socket, type !== 'notify'))
     })
 
-    socket.ev.on('messaging-history.set', ({ messages }) => {
+    socket.ev.on('messaging-history.set', ({ messages, contacts, chats, lidPnMappings }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      this.trackDispatch(this.dispatch(messages, socket, true))
+      this.trackDispatch(
+        (async () => {
+          for (const chat of chats ?? []) {
+            this.rememberChat(chat)
+          }
+          for (const contact of contacts ?? []) {
+            await this.applyContact(contact)
+          }
+          for (const mapping of lidPnMappings ?? []) {
+            await this.applyLidMapping(mapping)
+          }
+          await this.dispatch(messages, socket, true)
+        })(),
+      )
+    })
+
+    socket.ev.on('chats.upsert', (chats) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      for (const chat of chats) {
+        this.rememberChat(chat)
+      }
+    })
+
+    socket.ev.on('chats.update', (updates) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      for (const update of updates) {
+        if (!update.id) continue
+        this.rememberChat({ id: update.id, ...update })
+      }
+    })
+
+    socket.ev.on('contacts.upsert', (contacts) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      this.trackDispatch(
+        (async () => {
+          for (const contact of contacts) {
+            await this.applyContact(contact)
+          }
+        })(),
+      )
+    })
+
+    socket.ev.on('contacts.update', (updates) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      this.trackDispatch(
+        (async () => {
+          for (const update of updates) {
+            if (!update.id) continue
+            await this.applyContact({ ...update, id: update.id })
+          }
+        })(),
+      )
+    })
+
+    socket.ev.on('lid-mapping.update', (mapping) => {
+      if (!this.isCurrentSocket(socket, generation)) return
+      void this.applyLidMapping(mapping)
     })
 
     socket.ev.on('groups.upsert', (groups) => {
@@ -243,6 +380,47 @@ export class WhatsAppProvider implements MessagingProvider {
     })
   }
 
+  private rememberChat(chat: Partial<Chat>): void {
+    const id = chat.id
+    if (!id) return
+    const existing = this.chatCache.get(id)
+    const merged: Chat & { id: string } = { ...existing, ...chat, id }
+    this.chatCache.set(id, merged)
+    void this.applyChatLabel(merged)
+  }
+
+  private async applyChatLabel(chat: Chat & { id: string }): Promise<void> {
+    const meta = contactMetaFromChat(chat)
+    if (!meta) return
+    const primaryId = meta.externalIds[0]
+    if (!primaryId) return
+    this.mergeContact({
+      id: primaryId,
+      name: meta.addressBookName ?? undefined,
+      lid: chat.lidJid ?? undefined,
+      phoneNumber: chat.pnJid ?? undefined,
+    })
+    if (this.contactRefreshStats && meta.addressBookName) {
+      this.contactRefreshStats.addressBookNames += 1
+    }
+    await this.contactMetaHandler?.(meta)
+  }
+
+  private mergeContact(contact: Partial<Contact> & { id: string }): void {
+    const existing = this.contactCache.get(contact.id)
+    const merged: Partial<Contact> & { id: string } = {
+      ...existing,
+      id: contact.id,
+    }
+    for (const key of ['name', 'notify', 'verifiedName', 'lid', 'phoneNumber'] as const) {
+      const value = contact[key]
+      if (value !== undefined && value !== null) {
+        merged[key] = value
+      }
+    }
+    this.contactCache.set(contact.id, merged)
+  }
+
   private applyGroupName(id: string, subject: string): void {
     this.groupNames.set(id, subject)
     void this.conversationMetaHandler?.({
@@ -252,7 +430,34 @@ export class WhatsAppProvider implements MessagingProvider {
     })
   }
 
-  private async refreshGroupNames(socket: WASocket): Promise<void> {
+  private async applyContact(contact: Partial<Contact> & { id: string }): Promise<void> {
+    this.mergeContact(contact)
+    const meta = contactMetaFromBaileys(contact)
+    if (this.contactRefreshStats) {
+      if (meta.addressBookName) this.contactRefreshStats.addressBookNames += 1
+      if (meta.pushName) this.contactRefreshStats.pushNames += 1
+    }
+    await this.contactMetaHandler?.(meta)
+  }
+
+  private async applyLidMapping(mapping: LIDMapping): Promise<void> {
+    const phoneContact = this.contactCache.get(mapping.pn)
+    const lidContact = this.contactCache.get(mapping.lid)
+    const namedContact = phoneContact?.name || phoneContact?.notify ? phoneContact : lidContact
+    if (namedContact) {
+      await this.applyContact({
+        id: mapping.pn,
+        name: namedContact.name,
+        notify: namedContact.notify,
+        verifiedName: namedContact.verifiedName,
+        lid: mapping.lid,
+        phoneNumber: mapping.pn,
+      })
+    }
+    await this.contactMetaHandler?.(contactMetaFromLidMapping(mapping))
+  }
+
+  private async refreshGroupNames(socket: WASocket): Promise<number> {
     try {
       const groups = await socket.groupFetchAllParticipating()
       for (const group of Object.values(groups)) {
@@ -263,11 +468,138 @@ export class WhatsAppProvider implements MessagingProvider {
           name: group.subject ?? null,
         })
       }
+      return Object.values(groups).length
     } catch (error) {
       this.log.error('failed to refresh WhatsApp group names', {
         error: describeError(error),
       })
+      return 0
     }
+  }
+
+  private async waitForContactSyncEvents(socket: WASocket): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let settled = false
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(maxTimer)
+        if (idleTimer) clearTimeout(idleTimer)
+        socket.ev.off('contacts.upsert', onContactEvent)
+        socket.ev.off('contacts.update', onContactEvent)
+        resolve()
+      }
+
+      const onContactEvent = (): void => {
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(finish, DIRECTORY_CONTACT_IDLE_MS)
+      }
+
+      const maxTimer = setTimeout(finish, DIRECTORY_RESYNC_WAIT_MS)
+      socket.ev.on('contacts.upsert', onContactEvent)
+      socket.ev.on('contacts.update', onContactEvent)
+      idleTimer = setTimeout(finish, DIRECTORY_CONTACT_IDLE_MS)
+    })
+  }
+
+  private async requestAddressBookResync(socket: WhatsAppSocket): Promise<void> {
+    if (socket.cleanDirtyBits) {
+      try {
+        await socket.cleanDirtyBits('account_sync')
+      } catch (error) {
+        this.log.warn('could not clean WhatsApp account-sync dirty bits', {
+          error: describeError(error),
+        })
+      }
+    }
+    await socket.resyncAppState(ALL_WA_PATCH_NAMES, false)
+  }
+
+  private async refreshContacts(socket: WASocket): Promise<void> {
+    try {
+      await this.requestAddressBookResync(socket)
+      this.log.info('requested WhatsApp contact address-book resync')
+    } catch (error) {
+      this.log.error('failed to refresh WhatsApp contacts', {
+        error: describeError(error),
+      })
+    }
+  }
+
+  async syncDirectory(handlers: DirectorySyncHandlers): Promise<ContactRefreshResult> {
+    const socket = this.usableSocket()
+    const result: ContactRefreshResult = {
+      addressBookNames: 0,
+      pushNames: 0,
+      groupNames: 0,
+      contacts: 0,
+    }
+    const syncedContacts = new Set<string>()
+
+    const persistContact = async (meta: ReturnType<typeof contactMetaFromBaileys>): Promise<void> => {
+      const key = [...meta.externalIds].sort().join('|')
+      if (syncedContacts.has(key)) return
+      syncedContacts.add(key)
+      if (meta.addressBookName) result.addressBookNames += 1
+      if (meta.pushName) result.pushNames += 1
+      await handlers.onContact(meta)
+      result.contacts += 1
+    }
+
+    result.groupNames = await this.refreshGroupNames(socket)
+    for (const [externalId, subject] of this.groupNames) {
+      await handlers.onConversation({
+        externalId,
+        kind: 'group',
+        name: subject ?? null,
+      })
+    }
+
+    for (const [chatId, chat] of this.chatCache) {
+      const kind = conversationKindFromJid(chatId)
+      if (!kind) continue
+      const chatLabel = chatLabelFromBaileys(chat)
+      await handlers.onConversation({
+        externalId: chatId,
+        kind,
+        name:
+          kind === 'group'
+            ? (this.groupNames.get(chatId) ?? chatLabel)
+            : chatLabel,
+      })
+      const chatMeta = contactMetaFromChat({ ...chat, id: chatId })
+      if (chatMeta) {
+        await persistContact(chatMeta)
+      }
+    }
+
+    try {
+      await this.requestAddressBookResync(socket)
+    } catch (error) {
+      this.log.error('failed to refresh WhatsApp contacts during directory sync', {
+        error: describeError(error),
+      })
+    }
+    await this.waitForContactSyncEvents(socket)
+
+    for (const contact of this.contactCache.values()) {
+      await persistContact(contactMetaFromBaileys(contact as Contact))
+    }
+
+    this.log.info('WhatsApp directory sync complete', { ...result })
+    return result
+  }
+
+  async refreshContactNames(): Promise<ContactRefreshResult> {
+    if (!this.contactMetaHandler || !this.conversationMetaHandler) {
+      return { addressBookNames: 0, pushNames: 0, groupNames: 0, contacts: 0 }
+    }
+    return this.syncDirectory({
+      onContact: this.contactMetaHandler,
+      onConversation: this.conversationMetaHandler,
+    })
   }
 
   /**
@@ -276,8 +608,6 @@ export class WhatsAppProvider implements MessagingProvider {
    * database: its persistence fails, falls to the buffer, and nobody drains that buffer.
    */
   private trackDispatch(dispatch: Promise<void>): void {
-    // Tracking absorbs rejection: shutdown is the waiter, and a dispatch failure must
-    // not block releasing resources.
     const tracked = dispatch
       .catch((error: unknown) => {
         this.log.error('inbound message dispatch failed', {
@@ -293,11 +623,15 @@ export class WhatsAppProvider implements MessagingProvider {
   private async createSocket(): Promise<{
     socket: WASocket
     saveCreds: () => Promise<void>
+    alreadyLinked: boolean
   }> {
     if (this.options.socketFactory) {
+      const socket = await this.options.socketFactory()
+      const creds = socket.authState?.creds
       return {
-        socket: await this.options.socketFactory(),
+        socket,
         saveCreds: async () => {},
+        alreadyLinked: Boolean(creds?.registered || creds?.me),
       }
     }
 
@@ -309,10 +643,14 @@ export class WhatsAppProvider implements MessagingProvider {
     const socket = makeWASocket({
       auth: state,
       version,
+      browser: Browsers.macOS('Chrome'),
       syncFullHistory: true,
+      markOnlineOnConnect: false,
       logger: createBaileysLogger(this.log),
     })
-    return { socket, saveCreds }
+    // Prefer auth-file identity: socket.authState.creds.registered can stay false after link.
+    const alreadyLinked = Boolean(state.creds.registered || state.creds.me)
+    return { socket, saveCreds, alreadyLinked }
   }
 
   async waitUntilReady(timeoutMs = DEFAULT_READY_TIMEOUT_MS): Promise<void> {

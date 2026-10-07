@@ -1,5 +1,10 @@
 import type {
+  ContactMeta,
+  ContactMetaHandler,
+  ConversationMeta,
   ConversationMetaHandler,
+  ContactRefreshResult,
+  DirectorySyncHandlers,
   FatalHandler,
   InboundHandler,
   MessagingProvider,
@@ -36,6 +41,7 @@ export class FakeProvider implements MessagingProvider {
   private handler: InboundHandler | null = null
   private fatalHandler: FatalHandler | null = null
   private conversationMetaHandler: ConversationMetaHandler | null = null
+  private contactMetaHandler: ContactMetaHandler | null = null
   private connected = false
   private nextSendError: Error | null = null
   private readonly downloadErrors: Error[] = []
@@ -76,6 +82,10 @@ export class FakeProvider implements MessagingProvider {
     this.conversationMetaHandler = handler
   }
 
+  onContactMeta(handler: ContactMetaHandler): void {
+    this.contactMetaHandler = handler
+  }
+
   // Test-only helpers: not part of MessagingProvider; do not call from production.
   async inject(message: InboundMessage): Promise<void> {
     if (!this.connected) throw new Error('FakeProvider is not connected')
@@ -93,6 +103,10 @@ export class FakeProvider implements MessagingProvider {
     conversation: Parameters<ConversationMetaHandler>[0],
   ): Promise<void> {
     await this.conversationMetaHandler?.(conversation)
+  }
+
+  async emitContactMeta(contact: Parameters<ContactMetaHandler>[0]): Promise<void> {
+    await this.contactMetaHandler?.(contact)
   }
 
   failNextSend(error: Error): void {
@@ -154,6 +168,32 @@ export class FakeProvider implements MessagingProvider {
       throw error
     }
     return { localPath: `/tmp/fake/${attachmentExternalId}`, sizeBytes: 4096 }
+  }
+
+  refreshContactNamesCalls = 0
+  syncDirectoryCalls = 0
+  readonly directoryContacts: ContactMeta[] = []
+  readonly directoryConversations: ConversationMeta[] = []
+
+  async syncDirectory(handlers: DirectorySyncHandlers): Promise<ContactRefreshResult> {
+    this.syncDirectoryCalls += 1
+    for (const contact of this.directoryContacts) {
+      await handlers.onContact(contact)
+    }
+    for (const conversation of this.directoryConversations) {
+      await handlers.onConversation(conversation)
+    }
+    return {
+      addressBookNames: this.directoryContacts.filter((c) => c.addressBookName).length,
+      pushNames: this.directoryContacts.filter((c) => c.pushName).length,
+      groupNames: this.directoryConversations.filter((c) => c.kind === 'group').length,
+      contacts: this.directoryContacts.length,
+    }
+  }
+
+  async refreshContactNames(): Promise<ContactRefreshResult> {
+    this.refreshContactNamesCalls += 1
+    return { addressBookNames: 2, pushNames: 0, groupNames: 1, contacts: 2 }
   }
 
   async listConversations(): Promise<ConversationSummary[]> {

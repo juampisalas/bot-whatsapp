@@ -56,7 +56,7 @@ afterAll(async () => {
 
 test('rangeToInterval today uses timezone midnight', () => {
   const { from, to } = rangeToInterval(
-    { range: 'today', lastNDays: null, isoFrom: null, isoTo: null },
+    { range: 'today', lastNDays: null, lastNHours: null, isoFrom: null, isoTo: null },
     NOW,
     TZ,
   )
@@ -66,7 +66,7 @@ test('rangeToInterval today uses timezone midnight', () => {
 
 test('rangeToInterval yesterday is the previous calendar day', () => {
   const { from, to } = rangeToInterval(
-    { range: 'yesterday', lastNDays: null, isoFrom: null, isoTo: null },
+    { range: 'yesterday', lastNDays: null, lastNHours: null, isoFrom: null, isoTo: null },
     NOW,
     TZ,
   )
@@ -76,7 +76,7 @@ test('rangeToInterval yesterday is the previous calendar day', () => {
 
 test('rangeToInterval this_week starts Monday 00:00 in timezone', () => {
   const { from, to } = rangeToInterval(
-    { range: 'this_week', lastNDays: null, isoFrom: null, isoTo: null },
+    { range: 'this_week', lastNDays: null, lastNHours: null, isoFrom: null, isoTo: null },
     NOW,
     TZ,
   )
@@ -86,11 +86,21 @@ test('rangeToInterval this_week starts Monday 00:00 in timezone', () => {
 
 test('rangeToInterval last_n_days is rolling hours from now', () => {
   const { from, to } = rangeToInterval(
-    { range: 'last_n_days', lastNDays: 7, isoFrom: null, isoTo: null },
+    { range: 'last_n_days', lastNDays: 7, lastNHours: null, isoFrom: null, isoTo: null },
     NOW,
     TZ,
   )
   expect(from.toISOString()).toBe(new Date('2026-08-23T18:00:00-03:00').toISOString())
+  expect(to.toISOString()).toBe(NOW.toISOString())
+})
+
+test('rangeToInterval last_n_hours is rolling from now', () => {
+  const { from, to } = rangeToInterval(
+    { range: 'last_n_hours', lastNDays: null, lastNHours: 2, isoFrom: null, isoTo: null },
+    NOW,
+    TZ,
+  )
+  expect(from.toISOString()).toBe(new Date('2026-08-30T16:00:00-03:00').toISOString())
   expect(to.toISOString()).toBe(NOW.toISOString())
 })
 
@@ -99,6 +109,7 @@ test('rangeToInterval iso parses local datetimes in timezone', () => {
     {
       range: 'iso',
       lastNDays: null,
+      lastNHours: null,
       isoFrom: '2026-08-29T09:00:00',
       isoTo: '2026-08-30T12:30:00',
     },
@@ -115,6 +126,7 @@ function summarizeOutput(overrides: Record<string, unknown> = {}) {
     conversationQuery: 'la facu',
     range: 'today',
     lastNDays: null,
+    lastNHours: null,
     isoFrom: null,
     isoTo: null,
     focus: null,
@@ -156,7 +168,7 @@ test('2: ambiguous query asks and saves clarification', async () => {
     llm,
     provider: CONTROL.provider,
     controlExternalId: CONTROL.conversationExternalId,
-    text: 'summarize facu',
+    text: 'summarize facu today',
     now: NOW,
     timezone: TZ,
   })
@@ -165,6 +177,7 @@ test('2: ambiguous query asks and saves clarification', async () => {
   if (result.kind !== 'ask') return
   expect(result.question).toMatch(/Facu fútbol/i)
   expect(result.question).toMatch(/Grupo Facu/i)
+  expect(result.question).toContain('0. Cancel')
 
   const pending = await loadActiveClarification(
     handle.db,
@@ -176,6 +189,42 @@ test('2: ambiguous query asks and saves clarification', async () => {
   expect(pending!.expiresAt.getTime()).toBe(NOW.getTime() + 10 * 60 * 1000)
 })
 
+test('2b: follow-up 0 cancels pending clarification', async () => {
+  const llm = new FakeLlm()
+  llm.enqueue({ text: '', output: summarizeOutput({ conversationQuery: 'facu' }) })
+  await interpret({
+    db: handle.db,
+    llm,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: 'summarize facu today',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  const llm2 = new FakeLlm()
+  const result = await interpret({
+    db: handle.db,
+    llm: llm2,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: '0',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  expect(result).toEqual({ kind: 'ask', question: 'Cancelled.' })
+  expect(llm2.calls).toHaveLength(0)
+
+  const pending = await loadActiveClarification(
+    handle.db,
+    CONTROL.provider,
+    CONTROL.conversationExternalId,
+    NOW,
+  )
+  expect(pending).toBeNull()
+})
+
 test('3: follow-up picks candidate 1 and clears clarification', async () => {
   const llm = new FakeLlm()
   llm.enqueue({ text: '', output: summarizeOutput({ conversationQuery: 'facu' }) })
@@ -184,7 +233,7 @@ test('3: follow-up picks candidate 1 and clears clarification', async () => {
     llm,
     provider: CONTROL.provider,
     controlExternalId: CONTROL.conversationExternalId,
-    text: 'summarize facu',
+    text: 'summarize facu today',
     now: NOW,
     timezone: TZ,
   })
@@ -228,7 +277,7 @@ test('4: expired clarification is ignored and message is interpreted fresh', asy
     llm,
     provider: CONTROL.provider,
     controlExternalId: CONTROL.conversationExternalId,
-    text: 'summarize facu',
+    text: 'summarize facu today',
     now: NOW,
     timezone: TZ,
   })
@@ -253,20 +302,8 @@ test('4: expired clarification is ignored and message is interpreted fresh', asy
   expect(llm2.calls).toHaveLength(1)
 })
 
-test('5: help intent returns help', async () => {
+test('5: exact help returns help without calling the LLM', async () => {
   const llm = new FakeLlm()
-  llm.enqueue({
-    text: '',
-    output: {
-      intent: 'help',
-      conversationQuery: null,
-      range: null,
-      lastNDays: null,
-      isoFrom: null,
-      isoTo: null,
-      focus: null,
-    },
-  })
 
   const result = await interpret({
     db: handle.db,
@@ -279,6 +316,69 @@ test('5: help intent returns help', async () => {
   })
 
   expect(result).toEqual({ kind: 'help' })
+  expect(llm.calls).toHaveLength(0)
+})
+
+test('5b: summarize my chat with X today skips the LLM', async () => {
+  const llm = new FakeLlm()
+  const result = await interpret({
+    db: handle.db,
+    llm,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: 'Summarize my chat with la facu today',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  expect(result).toEqual({
+    kind: 'request',
+    request: {
+      conversationId: grupoFacuId,
+      from: new Date('2026-08-30T00:00:00-03:00'),
+      to: NOW,
+      focus: null,
+    },
+  })
+  expect(llm.calls).toHaveLength(0)
+})
+
+test('5c: summarize without range asks for a time window', async () => {
+  const llm = new FakeLlm()
+  const result = await interpret({
+    db: handle.db,
+    llm,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: 'Resumí mi chat con la facu',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  expect(result.kind).toBe('ask')
+  if (result.kind !== 'ask') return
+  expect(result.question).toMatch(/time range/i)
+  expect(llm.calls).toHaveLength(0)
+
+  const followUp = await interpret({
+    db: handle.db,
+    llm,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: 'última hora',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  expect(followUp).toEqual({
+    kind: 'request',
+    request: {
+      conversationId: grupoFacuId,
+      from: new Date(NOW.getTime() - 60 * 60 * 1000),
+      to: NOW,
+      focus: null,
+    },
+  })
 })
 
 test('6: resolve none returns ask, not an empty request', async () => {
@@ -300,21 +400,23 @@ test('6: resolve none returns ask, not an empty request', async () => {
   expect(result.question.length).toBeGreaterThan(0)
 })
 
-test('7: FakeLlm generate errors propagate', async () => {
+test('7: LLM generate errors become a clarification ask', async () => {
   const llm = new FakeLlm()
   // empty queue → generate throws
 
-  await expect(
-    interpret({
-      db: handle.db,
-      llm,
-      provider: CONTROL.provider,
-      controlExternalId: CONTROL.conversationExternalId,
-      text: 'summarize la facu',
-      now: NOW,
-      timezone: TZ,
-    }),
-  ).rejects.toThrow(/no queued responses/i)
+  const result = await interpret({
+    db: handle.db,
+    llm,
+    provider: CONTROL.provider,
+    controlExternalId: CONTROL.conversationExternalId,
+    text: 'please catch me up on what happened with facu',
+    now: NOW,
+    timezone: TZ,
+  })
+
+  expect(result.kind).toBe('ask')
+  if (result.kind !== 'ask') return
+  expect(result.question).toMatch(/could not understand/i)
 })
 
 test('interpret wires searchConversations tool to the llm', async () => {
@@ -330,7 +432,7 @@ test('interpret wires searchConversations tool to the llm', async () => {
     llm,
     provider: CONTROL.provider,
     controlExternalId: CONTROL.conversationExternalId,
-    text: 'summarize la facu',
+    text: 'please catch me up on facu today',
     now: NOW,
     timezone: TZ,
   })

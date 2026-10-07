@@ -5,6 +5,20 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   PROVIDER: z.enum(['whatsapp', 'fake']).default('whatsapp'),
   WHATSAPP_AUTH_DIR: z.string().min(1).default('./data/wa-auth'),
+  /**
+   * Digits only, with country code (e.g. 54911…). When set, link with a pairing code
+   * instead of a QR. Empty/omitted keeps QR linking.
+   */
+  WHATSAPP_PHONE_NUMBER: z
+    .string()
+    .optional()
+    .transform((value) => {
+      if (!value?.trim()) return undefined
+      return value.replace(/\D/g, '')
+    })
+    .refine((value) => value === undefined || /^\d{8,15}$/.test(value), {
+      message: 'must be 8–15 digits including country code',
+    }),
   MEDIA_DIR: z.string().min(1).default('./data/media'),
   CONTROL_PROVIDER: z.enum(['whatsapp', 'fake']).default('whatsapp'),
   CONTROL_CONVERSATION_ID: z.string().optional(),

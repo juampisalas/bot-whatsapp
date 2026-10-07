@@ -7,6 +7,7 @@ import { insertAttachments } from '../store/repositories/attachments.ts'
 import {
   upsertConversation,
   upsertParticipant,
+  syncPushName,
 } from '../store/repositories/conversations.ts'
 import { encodeRaw } from '../store/raw.ts'
 import { insertMessage } from '../store/repositories/messages.ts'
@@ -46,6 +47,18 @@ export function createIngestPipeline(deps: IngestDeps) {
           displayName: message.sender.displayName,
         })
       : null
+
+    if (message.conversation.kind === 'dm') {
+      const pushName = message.sender?.displayName ?? null
+      if (pushName) {
+        await syncPushName(deps.db, message.provider, {
+          externalIds: [message.conversation.externalId, message.sender?.externalId].filter(
+            (id): id is string => typeof id === 'string' && id.length > 0,
+          ),
+          name: pushName,
+        })
+      }
+    }
 
     const { id, inserted } = await insertMessage(deps.db, {
       provider: message.provider,
