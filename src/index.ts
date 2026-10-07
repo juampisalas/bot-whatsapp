@@ -4,6 +4,10 @@ import { createIngestPipeline } from './capture/ingest.ts'
 import type { CapturePolicy } from './capture/policy.ts'
 import { parseCommand, type Command } from './cli.ts'
 import { loadConfig } from './config/index.ts'
+import {
+  shouldAnswerControlMessage,
+  shouldDiscardUnansweredControlMessage,
+} from './control/classify.ts'
 import { createControlLoop } from './control/loop.ts'
 import { describeError } from './domain/logger.ts'
 import { createLogger } from './logger.ts'
@@ -13,6 +17,7 @@ import { createShutdown } from './shutdown.ts'
 import { createDb } from './store/client.ts'
 import { loadCapturePolicy } from './store/repositories/capture-policy.ts'
 import { upsertConversation } from './store/repositories/conversations.ts'
+import { deleteMessageByExternalId } from './store/repositories/messages.ts'
 
 const config = loadConfig()
 const log = createLogger(config.LOG_LEVEL)
@@ -137,12 +142,36 @@ if (config.CONTROL_CONVERSATION_ID) {
 }
 
 provider.onMessage(async (message) => {
+  if (
+    shouldDiscardUnansweredControlMessage({
+      message,
+      controlConversationId: config.CONTROL_CONVERSATION_ID,
+    })
+  ) {
+    try {
+      await deleteMessageByExternalId(db, message.provider, message.externalId)
+    } catch (error) {
+      log.warn('could not drop unanswered control message', {
+        externalId: message.externalId,
+        error: describeError(error),
+      })
+    }
+    return
+  }
+
+  let stored: { inserted: boolean } | undefined
   try {
-    await pipeline.handle(message)
+    stored = await pipeline.handle(message)
   } catch (error) {
     log.error('ingest crashed', { error: describeError(error) })
   }
-  if (control) {
+  if (
+    control &&
+    shouldAnswerControlMessage({
+      historical: message.historical === true,
+      newlyCaptured: stored?.inserted === true,
+    })
+  ) {
     try {
       await control.handle(message)
     } catch (error) {

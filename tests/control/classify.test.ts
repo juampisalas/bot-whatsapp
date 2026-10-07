@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test'
-import { BOT_PREFIX, classifyControlMessage } from '../../src/control/classify.ts'
+import {
+  BOT_PREFIX,
+  classifyControlMessage,
+  shouldAnswerControlMessage,
+  shouldDiscardUnansweredControlMessage,
+} from '../../src/control/classify.ts'
 import { mensaje } from '../helpers/fixtures.ts'
 
 const control = { provider: 'fake' as const, conversationId: 'ctrl' }
@@ -96,4 +101,37 @@ test('ignores empty or whitespace-only text', () => {
       isKnownBotMessage: false,
     }),
   ).toBe('ignore')
+})
+
+test('does not answer history or a message that was already stored', () => {
+  expect(shouldAnswerControlMessage({ historical: true, newlyCaptured: true })).toBe(false)
+  expect(shouldAnswerControlMessage({ historical: false, newlyCaptured: false })).toBe(false)
+  expect(shouldAnswerControlMessage({ historical: false, newlyCaptured: true })).toBe(true)
+})
+
+test('discards unanswered historical control commands and keeps live ones', () => {
+  const command = mensaje({
+    fromSelf: true,
+    text: 'Resumí mi chat con Gusma ayer',
+    conversation: { externalId: 'ctrl', kind: 'group', name: 'C' },
+    historical: true,
+  })
+  expect(
+    shouldDiscardUnansweredControlMessage({
+      message: command,
+      controlConversationId: 'ctrl',
+    }),
+  ).toBe(true)
+  expect(
+    shouldDiscardUnansweredControlMessage({
+      message: { ...command, historical: false },
+      controlConversationId: 'ctrl',
+    }),
+  ).toBe(false)
+  expect(
+    shouldDiscardUnansweredControlMessage({
+      message: { ...command, text: '✦ Cancelled.' },
+      controlConversationId: 'ctrl',
+    }),
+  ).toBe(false)
 })

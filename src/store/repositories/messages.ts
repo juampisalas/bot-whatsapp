@@ -68,6 +68,17 @@ export async function insertMessage(
   })
 }
 
+/** Removes a stored message. Attachments cascade. No-op when the row is absent. */
+export async function deleteMessageByExternalId(
+  db: Db,
+  provider: ProviderId,
+  externalId: string,
+): Promise<void> {
+  await db
+    .delete(messages)
+    .where(and(eq(messages.provider, provider), eq(messages.externalId, externalId)))
+}
+
 export async function countMessagesInConversation(db: Db, conversationId: string): Promise<number> {
   const rows = await db
     .select({ total: count() })

@@ -9,7 +9,8 @@ import type {
   SentMessage,
 } from './types.ts'
 
-export type InboundHandler = (message: InboundMessage) => Promise<void>
+/** The return value is ignored by providers; `unknown` lets pipelines report what they stored. */
+export type InboundHandler = (message: InboundMessage) => Promise<unknown>
 
 export type FatalHandler = (error: Error) => void
 

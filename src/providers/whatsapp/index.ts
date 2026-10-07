@@ -215,14 +215,15 @@ export class WhatsAppProvider implements MessagingProvider {
       }
     })
 
-    socket.ev.on('messages.upsert', ({ messages }) => {
+    socket.ev.on('messages.upsert', ({ messages, type }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      this.trackDispatch(this.dispatch(messages, socket))
+      // Only 'notify' carries live messages; 'append' is offline backlog replayed on connect.
+      this.trackDispatch(this.dispatch(messages, socket, type !== 'notify'))
     })
 
     socket.ev.on('messaging-history.set', ({ messages }) => {
       if (!this.isCurrentSocket(socket, generation)) return
-      this.trackDispatch(this.dispatch(messages, socket))
+      this.trackDispatch(this.dispatch(messages, socket, true))
     })
 
     socket.ev.on('groups.upsert', (groups) => {
@@ -353,7 +354,11 @@ export class WhatsAppProvider implements MessagingProvider {
     }
   }
 
-  private async dispatch(waMessages: readonly WAMessage[], socket: WASocket): Promise<void> {
+  private async dispatch(
+    waMessages: readonly WAMessage[],
+    socket: WASocket,
+    historical: boolean,
+  ): Promise<void> {
     const handler = this.handler
     const ownId = socket.user?.id
     if (!handler) return
@@ -375,6 +380,7 @@ export class WhatsAppProvider implements MessagingProvider {
         groupName: this.groupNames.get(raw.key?.remoteJid ?? '') ?? null,
       })
       if (!normalized) continue
+      if (historical) normalized.historical = true
       try {
         await handler(normalized)
       } catch (error) {

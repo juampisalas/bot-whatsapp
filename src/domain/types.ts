@@ -46,6 +46,11 @@ export interface InboundMessage {
   /** Solo para canales de correo. Null en mensajería instantánea. */
   threadExternalId: string | null
   replyToExternalId: string | null
+  /**
+   * True for history sync and offline backlog. Those messages are stored, but the
+   * control loop must not answer them: a reconnect would otherwise replay old commands.
+   */
+  historical?: boolean
   attachments: InboundAttachment[]
   /**
    * Carga original del proveedor. Únicamente el adaptador que la produjo

@@ -31,7 +31,7 @@ export function createIngestPipeline(deps: IngestDeps) {
     log,
   })
 
-  async function persist(message: InboundMessage): Promise<void> {
+  async function persist(message: InboundMessage): Promise<boolean> {
     const conversationId = await upsertConversation(deps.db, {
       provider: message.provider,
       externalId: message.conversation.externalId,
@@ -47,7 +47,7 @@ export function createIngestPipeline(deps: IngestDeps) {
         })
       : null
 
-    const { id } = await insertMessage(deps.db, {
+    const { id, inserted } = await insertMessage(deps.db, {
       provider: message.provider,
       externalId: message.externalId,
       conversationId,
@@ -64,13 +64,15 @@ export function createIngestPipeline(deps: IngestDeps) {
     // Conditional upsert fills null metadata on redelivery without clobbering known values.
     await insertAttachments(deps.db, id, message.attachments)
     await downloadPendingAttachments(message, id)
+    return inserted
   }
 
-  async function handle(message: InboundMessage): Promise<void> {
-    if (!shouldCapture(deps.policy, message.conversation.externalId)) return
+  async function handle(message: InboundMessage): Promise<{ inserted: boolean } | undefined> {
+    if (!shouldCapture(deps.policy, message.conversation.externalId)) return undefined
 
     try {
-      await persist(message)
+      const inserted = await persist(message)
+      return { inserted }
     } catch (error) {
       buffer.push(message)
       log.warn('could not persist, message buffered', {
